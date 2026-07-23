@@ -6,6 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::Manager;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// Windows process creation flag that prevents a console/CMD window
+/// from appearing when spawning child processes from a GUI app.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 const CODE_SERVER_PORT: u16 = 8080;
 /// TCP port polling timeout (seconds).
 const TCP_POLL_TIMEOUT_SECS: u64 = 60;
@@ -251,8 +259,8 @@ fn spawn_code_server(
         ),
     );
 
-    Command::new(&node_exe)
-        .arg(&cs_entry)
+    let mut cmd = Command::new(&node_exe);
+    cmd.arg(&cs_entry)
         .arg("--bind-addr")
         .arg(format!("127.0.0.1:{}", CODE_SERVER_PORT))
         .arg("--auth")
@@ -263,8 +271,13 @@ fn spawn_code_server(
         // can resolve its node_modules and relative imports.
         .current_dir(cs_entry.parent().unwrap_or(std::path::Path::new(".")))
         .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
+        .stderr(Stdio::from(stderr_file));
+
+    // Prevent a CMD/console window from appearing on Windows.
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    cmd.spawn()
         .map_err(|e| format!("failed to spawn code-server: {}", e))
 }
 

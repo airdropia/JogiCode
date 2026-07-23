@@ -1,15 +1,18 @@
 """Generate JogiCode icons from a source PNG.
 
-If a source icon is available at the project root (jogicode.png) or in
-the upload directory, it is used to generate all required Tauri icon
-sizes. Otherwise, a solid-color RGBA placeholder is generated.
+If a source icon is available at the project root (jogicode.png), it is
+used to generate all required Tauri icon sizes. Otherwise, a solid-color
+RGBA placeholder is generated.
 
 Tauri requires icon PNGs to have an alpha channel (RGBA, color_type=6).
+The .ico file must be a proper multi-resolution ICO for Windows desktop
+shortcuts to display the correct icon.
 """
 
 import struct
 import zlib
 from pathlib import Path
+from io import BytesIO
 
 try:
     from PIL import Image
@@ -20,14 +23,12 @@ except ImportError:
 ICON_DIR = Path(__file__).resolve().parent.parent / "icons"
 ICON_DIR.mkdir(parents=True, exist_ok=True)
 
-# Source icon search paths (in priority order)
 SOURCE_PATHS = [
     Path(__file__).resolve().parent.parent.parent / "jogicode.png",
     Path("/home/z/my-project/upload/jogicode.png"),
     Path(__file__).resolve().parent.parent / "jogicode.png",
 ]
 
-# Fallback brand color (indigo-violet #6366F1)
 FALLBACK_RGB = (0x63, 0x66, 0xF1)
 
 
@@ -39,7 +40,6 @@ def find_source() -> Path | None:
 
 
 def make_placeholder_png(size: int) -> bytes:
-    """Generate a solid-color RGBA placeholder PNG."""
     R, G, B, A = (*FALLBACK_RGB, 0xFF)
     sig = b"\x89PNG\r\n\x1a\n"
 
@@ -61,26 +61,70 @@ def write_png(data: bytes, name: str) -> None:
     (ICON_DIR / name).write_bytes(data)
 
 
-def write_ico(png_256: bytes, name: str) -> None:
-    """Build a multi-resolution .ico from a 256x256 PNG."""
-    header = struct.pack("<HHH", 0, 1, 1)
-    entry = struct.pack(
-        "<BBBBHHII",
-        0,  # 0 means 256
-        0,  # 0 means 256
-        0,
-        0,
-        1,
-        32,
-        len(png_256),
-        22,
-    )
-    (ICON_DIR / name).write_bytes(header + entry + png_256)
+def write_multi_res_ico(img: Image.Image, name: str) -> None:
+    """Build a proper multi-resolution .ico file with 16, 32, 48, 64, 128, 256 sizes.
+
+    Windows desktop shortcuts require a multi-resolution ICO to display
+    the correct icon at all sizes (16x16 for taskbar, 32x32 for desktop,
+    48x48 for file explorer, 256x256 for large icons view).
+    """
+    sizes = [16, 32, 48, 64, 128, 256]
+    pngs = []
+    for size in sizes:
+        resized = img.resize((size, size), Image.LANCZOS)
+        buf = BytesIO()
+        resized.save(buf, format="PNG")
+        pngs.append(buf.getvalue())
+
+    # ICONDIR header: reserved(2)=0, type(2)=1, count(2)=num_images
+    header = struct.pack("<HHH", 0, 1, len(sizes))
+
+    # Calculate offset: header(6) + entries(16 each)
+    entries_start = 6 + (16 * len(sizes))
+    offset = entries_start
+
+    entries = b""
+    for i, size in enumerate(sizes):
+        png_data = pngs[i]
+        # ICONDIRENTRY: width(1), height(1), colors(1)=0, reserved(1)=0,
+        # planes(2)=1, bitcount(2)=32, size(4), offset(4)
+        w = size if size < 256 else 0
+        h = size if size < 256 else 0
+        entries += struct.pack(
+            "<BBBBHHII",
+            w, h, 0, 0, 1, 32, len(png_data), offset
+        )
+        offset += len(png_data)
+
+    # Combine: header + entries + all PNG data
+    ico_data = header + entries
+    for png_data in pngs:
+        ico_data += png_data
+
+    (ICON_DIR / name).write_bytes(ico_data)
 
 
-def write_icns(png_128: bytes, name: str) -> None:
-    """Build a minimal .icns containing a single 128x128 PNG (ic07 magic)."""
-    body = b"ic07" + struct.pack(">I", len(png_128) + 8) + png_128
+def write_icns(img: Image.Image, name: str) -> None:
+    """Build a proper .icns with multiple sizes (32, 128, 256, 512)."""
+    # ic07 = 128x128, ic08 = 256x256, ic09 = 512x512, ic10 = 1024x1024
+    # icp4 = 32x32, icp5 = 64x64
+    icon_types = [
+        (32, b"icp4"),
+        (128, b"ic07"),
+        (256, b"ic08"),
+        (512, b"ic09"),
+    ]
+
+    body = b""
+    for size, magic in icon_types:
+        resized = img.resize((size, size), Image.LANCZOS)
+        buf = BytesIO()
+        resized.save(buf, format="PNG")
+        png_data = buf.getvalue()
+        # Each icon: magic(4) + size(4) + png_data
+        body += magic + struct.pack(">I", len(png_data) + 8) + png_data
+
+    # ICNS header: magic(4) + total_size(4) + body
     (ICON_DIR / name).write_bytes(b"icns" + struct.pack(">I", len(body) + 8) + body)
 
 
@@ -92,7 +136,6 @@ def main() -> None:
         img = Image.open(source).convert("RGBA")
         print(f"Source size: {img.size}, mode: {img.mode}")
 
-        # Generate all required sizes
         sizes = {
             "32x32.png": 32,
             "128x128.png": 128,
@@ -102,26 +145,17 @@ def main() -> None:
 
         for name, size in sizes.items():
             resized = img.resize((size, size), Image.LANCZOS)
-            buf = resized.tobytes()  # not used directly
-            # Save via PIL to get proper RGBA PNG
             out_path = ICON_DIR / name
             resized.save(out_path, format="PNG")
             print(f"  Wrote {name} ({size}x{size})")
 
-        # Generate .ico from 256x256
-        img_256 = img.resize((256, 256), Image.LANCZOS)
-        import io
-        buf = io.BytesIO()
-        img_256.save(buf, format="PNG")
-        write_ico(buf.getvalue(), "icon.ico")
-        print("  Wrote icon.ico (256x256)")
+        # Generate proper multi-resolution .ico
+        write_multi_res_ico(img, "icon.ico")
+        print("  Wrote icon.ico (multi-res: 16,32,48,64,128,256)")
 
-        # Generate .icns from 128x128
-        img_128 = img.resize((128, 128), Image.LANCZOS)
-        buf = io.BytesIO()
-        img_128.save(buf, format="PNG")
-        write_icns(buf.getvalue(), "icon.icns")
-        print("  Wrote icon.icns (128x128)")
+        # Generate proper multi-resolution .icns
+        write_icns(img, "icon.icns")
+        print("  Wrote icon.icns (multi-res: 32,128,256,512)")
 
     else:
         if not source:
@@ -132,8 +166,15 @@ def main() -> None:
         write_png(make_placeholder_png(128), "128x128.png")
         write_png(make_placeholder_png(256), "128x128@2x.png")
         write_png(make_placeholder_png(512), "icon.png")
-        write_ico(make_placeholder_png(256), "icon.ico")
-        write_icns(make_placeholder_png(128), "icon.icns")
+        # Placeholder single-res ico
+        png = make_placeholder_png(256)
+        header = struct.pack("<HHH", 0, 1, 1)
+        entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png), 22)
+        (ICON_DIR / "icon.ico").write_bytes(header + entry + png)
+        # Placeholder icns
+        png128 = make_placeholder_png(128)
+        body = b"ic07" + struct.pack(">I", len(png128) + 8) + png128
+        (ICON_DIR / "icon.icns").write_bytes(b"icns" + struct.pack(">I", len(body) + 8) + body)
 
     # Verify all PNGs are RGBA (color_type=6)
     print("\nVerifying RGBA:")

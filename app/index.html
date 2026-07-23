@@ -27,11 +27,25 @@
       text-align: center;
     }
 
+    .logo-icon {
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 16px;
+      border-radius: 18px;
+      overflow: hidden;
+    }
+
+    .logo-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
     .logo {
-      font-size: 56px;
+      font-size: 48px;
       font-weight: 800;
       letter-spacing: -0.03em;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
       background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -39,20 +53,20 @@
     }
 
     .tagline {
-      font-size: 14px;
+      font-size: 13px;
       color: #5a6178;
-      margin-bottom: 40px;
+      margin-bottom: 36px;
       font-weight: 400;
     }
 
     .spinner {
-      width: 36px;
-      height: 36px;
+      width: 32px;
+      height: 32px;
       border: 3px solid #1f2430;
       border-top-color: #6366f1;
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
-      margin: 0 auto 20px;
+      margin: 0 auto 16px;
     }
 
     @keyframes spin {
@@ -60,9 +74,12 @@
     }
 
     .status {
-      font-size: 14px;
+      font-size: 13px;
       color: #8b93a7;
       transition: color 0.3s ease;
+      min-height: 20px;
+      max-width: 400px;
+      margin: 0 auto;
     }
 
     .status.error {
@@ -70,11 +87,11 @@
     }
 
     .progress-bar {
-      width: 200px;
+      width: 180px;
       height: 3px;
       background: #1f2430;
       border-radius: 999px;
-      margin: 16px auto 0;
+      margin: 14px auto 0;
       overflow: hidden;
     }
 
@@ -90,10 +107,24 @@
       50% { transform: translateX(0%); }
       100% { transform: translateX(100%); }
     }
+
+    .log-hint {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 11px;
+      color: #3a4055;
+      text-align: center;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
   <div class="container">
+    <div class="logo-icon">
+      <img src="icon.png" alt="JogiCode" />
+    </div>
     <div class="logo">JogiCode</div>
     <div class="tagline">Lightweight IDE · Powered by code-server</div>
     <div class="spinner"></div>
@@ -103,25 +134,29 @@
     </div>
   </div>
 
+  <div class="log-hint">
+    If stuck, check: %APPDATA%\com.jogicode.app\jogicode.log · Press F12 for DevTools
+  </div>
+
   <script>
     // The Rust backend polls port 8080 and calls window.eval() to navigate
     // here once code-server is ready. This page just shows a loading screen.
     //
     // We do NOT use fetch() to poll — the Tauri webview runs in a secure
     // context (https://tauri.localhost) which blocks fetch() to http://
-    // as mixed content. Rust handles the readiness check via TCP.
-    //
-    // The status text is updated by Rust via eval() if code-server fails.
+    // as mixed content. Rust handles the readiness check via TCP + HTTP.
 
-    // Update status text periodically to show progress.
     let dots = 0;
     const baseText = 'Starting code-server';
     const statusEl = document.getElementById('status');
 
     setInterval(() => {
       if (statusEl.classList.contains('error')) return;
-      dots = (dots + 1) % 4;
-      statusEl.textContent = baseText + '.'.repeat(dots);
+      // Don't animate dots if the status has been changed by Rust
+      if (statusEl.textContent.startsWith(baseText)) {
+        dots = (dots + 1) % 4;
+        statusEl.textContent = baseText + '.'.repeat(dots);
+      }
     }, 500);
   </script>
 </body>

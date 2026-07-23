@@ -127,6 +127,8 @@ jobs:
       - name: Ensure icons are valid RGBA
         shell: bash
         run: |
+          # Install Pillow for icon generation from source jogicode.png
+          pip install Pillow --quiet 2>&1 | tail -1 || true
           python3 src-tauri/scripts/make_icons.py
           for f in src-tauri/icons/*.png; do
             ct=$(python3 -c "

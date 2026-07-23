@@ -1,6 +1,6 @@
 [package]
 name = "jogicode"
-version = "1.0.0"
+version = "1.0.1"
 description = "JogiCode — Lightweight Windows IDE powered by code-server"
 authors = ["JogiCode"]
 edition = "2021"
@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-tauri = { version = "2.11.5", features = [] }
+tauri = { version = "2.11.5", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -231,8 +231,8 @@ fn spawn_code_server(
         .arg("none")
         .arg("--disable-telemetry")
         .arg("--disable-update-check")
-        .stdout(Stdio::from(log_handle))
-        .stderr(Stdio::from(stderr_handle))
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
         .spawn()
         .map_err(|e| format!("failed to spawn code-server: {}", e))
 }
@@ -289,7 +289,7 @@ pub fn run() {
 
             let log: LogFile = match log_file {
                 Ok(f) => {
-                    let log = Arc::new(Mutex::new(BufWriter::new(f)));
+                    let log = Arc::new(Mutex::new(BufWriter::new(Box::new(f) as Box<dyn Write + Send>)));
                     log_line(&log, &format!("JogiCode starting — log file: {:?}", log_path));
                     log
                 }

@@ -107,9 +107,35 @@ fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Strip the Windows UNC `\\?\` prefix from a path.
+///
+/// `Path::canonicalize()` on Windows returns UNC paths like
+/// `\\?\C:\Program Files\JogiCode\binaries\node.exe`. Node.js's
+/// `internal/modules/cjs/loader.js` calls `realpathSync()` which
+/// fails on this prefix with `EISDIR: illegal operation on a
+/// directory, lstat 'C:'`.
+///
+/// Stripping the `\\?\` prefix gives a regular Windows path that
+/// Node.js can resolve correctly.
+fn strip_unc_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        let stripped = &s[4..];
+        std::path::PathBuf::from(stripped)
+    } else if s.starts_with(r"\\?\UNC\") {
+        // UNC network path: \\?\UNC\server\share -> \\server\share
+        let stripped = &s[7..];
+        std::path::PathBuf::from(format!(r"\\{}", stripped))
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Resolve the path to the bundled node.exe and code-server entry point.
 /// Uses canonicalize() for absolute Windows paths, and falls back to
 /// recursive search if the expected entry.js path doesn't exist.
+/// The `\\?\` UNC prefix from canonicalize() is stripped because Node.js
+/// module resolution breaks on it.
 fn resolve_sidecar_paths(
     app: &tauri::App,
     log: &LogFile,
@@ -141,7 +167,8 @@ fn resolve_sidecar_paths(
     let node_exe = node_exe
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize node.exe path: {}", e))?;
-    log_line(log, &format!("node.exe canonical: {:?}", node_exe));
+    let node_exe = strip_unc_prefix(&node_exe);
+    log_line(log, &format!("node.exe canonical (UNC stripped): {:?}", node_exe));
 
     // code-server entry.js — try multiple known locations.
     let cs_base = binaries_dir.join("code-server");
@@ -188,7 +215,8 @@ fn resolve_sidecar_paths(
     let cs_entry = cs_entry
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize entry.js path: {}", e))?;
-    log_line(log, &format!("entry.js canonical: {:?}", cs_entry));
+    let cs_entry = strip_unc_prefix(&cs_entry);
+    log_line(log, &format!("entry.js canonical (UNC stripped): {:?}", cs_entry));
 
     Ok((node_exe, cs_entry))
 }
@@ -231,6 +259,9 @@ fn spawn_code_server(
         .arg("none")
         .arg("--disable-telemetry")
         .arg("--disable-update-check")
+        // Set working directory to code-server's directory so Node.js
+        // can resolve its node_modules and relative imports.
+        .current_dir(cs_entry.parent().unwrap_or(std::path::Path::new(".")))
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
         .spawn()

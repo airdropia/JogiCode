@@ -140,8 +140,9 @@ jobs:
           echo "Installing VS Code dependencies (WITH native module compilation)..."
           echo "GYP_MSVS_VERSION=$GYP_MSVS_VERSION"
 
-          # Configure npm to use VS 2022 for node-gyp
-          npm config set msvs_version 2022
+          # GYP_MSVS_VERSION=2022 is set in the workflow env block above.
+          # node-gyp reads this env var to find Visual Studio 2022.
+          # (Don't use 'npm config set msvs_version' — newer npm rejects it.)
 
           cd "$VSCODE_DIR"
           # Install WITHOUT --ignore-scripts so native modules compile.

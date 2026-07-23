@@ -96,19 +96,18 @@ jobs:
           rm -f /tmp/node.zip
 
           # ── 2. Install code-server npm package ──
-          # IMPORTANT: Do NOT use --ignore-scripts. code-server's postinstall
-          # script runs `cd lib/vscode && npm install` which installs VS Code's
-          # dependencies (like @microsoft/1ds-core-js) into lib/vscode/node_modules/.
-          # Without these, code-server crashes with ERR_MODULE_NOT_FOUND at runtime.
-          echo "Installing code-server@${{ env.CODE_SERVER_VERSION }} (with postinstall scripts)..."
+          # Strategy: install with --ignore-scripts to skip native module
+          # compilation (node-gyp needs Visual Studio Build Tools which
+          # aren't on the runner), then manually install VS Code's pure-JS
+          # dependencies that the postinstall script would have installed.
+          echo "Installing code-server@${{ env.CODE_SERVER_VERSION }}..."
           mkdir -p "$SIDECAR_DIR/code-server"
           cd "$SIDECAR_DIR/code-server"
 
-          # Create a minimal package.json and install code-server locally.
-          # Using --no-package-lock to avoid committing the lockfile, but
-          # NOT using --ignore-scripts so postinstall runs.
           npm init -y > /dev/null 2>&1
-          npm install "code-server@${{ env.CODE_SERVER_VERSION }}" --no-package-lock 2>&1 | tail -20
+          # Install code-server WITHOUT running postinstall scripts.
+          # This skips node-gyp native compilation (which needs VS Build Tools).
+          npm install "code-server@${{ env.CODE_SERVER_VERSION }}" --no-save --no-package-lock --ignore-scripts 2>&1 | tail -5
 
           cd - > /dev/null
 
@@ -116,19 +115,26 @@ jobs:
           ENTRY="$SIDECAR_DIR/code-server/node_modules/code-server/out/node/entry.js"
           if [ ! -f "$ENTRY" ]; then
             echo "ERROR: code-server entry.js not found at $ENTRY"
-            echo "Listing code-server dir:"
             find "$SIDECAR_DIR/code-server" -name "entry.js" 2>/dev/null | head -5
             exit 1
           fi
 
-          # Verify VS Code dependencies were installed by postinstall
-          VSCODE_DEPS="$SIDECAR_DIR/code-server/node_modules/code-server/lib/vscode/node_modules"
-          if [ -d "$VSCODE_DEPS" ]; then
-            echo "VS Code dependencies installed at: $VSCODE_DEPS"
-            ls "$VSCODE_DEPS" | head -10
+          # ── 3. Install VS Code's pure-JS dependencies manually ──
+          # code-server's postinstall normally runs `cd lib/vscode && npm install`
+          # which installs ~300 deps including @microsoft/1ds-core-js.
+          # We replicate this with --ignore-scripts to skip native modules.
+          VSCODE_DIR="$SIDECAR_DIR/code-server/node_modules/code-server/lib/vscode"
+          echo "Installing VS Code dependencies (with --ignore-scripts)..."
+          cd "$VSCODE_DIR"
+          npm install --no-save --no-package-lock --ignore-scripts 2>&1 | tail -10
+          cd - > /dev/null
+
+          # Verify @microsoft/1ds-core-js is now available
+          if [ -d "$VSCODE_DIR/node_modules/@microsoft/1ds-core-js" ]; then
+            echo "OK: @microsoft/1ds-core-js installed successfully"
           else
-            echo "WARNING: VS Code node_modules not found — code-server may crash at runtime"
-            echo "Checking if @microsoft/1ds-core-js exists anywhere:"
+            echo "WARNING: @microsoft/1ds-core-js not found in lib/vscode/node_modules"
+            echo "Searching for it anywhere in the tree:"
             find "$SIDECAR_DIR/code-server" -name "1ds-core-js" -type d 2>/dev/null | head -5
           fi
 

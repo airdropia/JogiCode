@@ -25,12 +25,16 @@ env:
   # Note: npm 'code-server' package lags behind GitHub releases.
   # Latest on npm as of 2026-07: 4.117.0
   CODE_SERVER_VERSION: "4.117.0"
+  # Tell node-gyp to use Visual Studio 2022 (pre-installed on windows-latest).
+  # Without this, node-gyp fails with "Could not find any Visual Studio
+  # installation to use" even though VS 2022 Enterprise is on the runner.
+  GYP_MSVS_VERSION: "2022"
 
 jobs:
   build:
     name: Build JogiCode (Windows x64)
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,17 +100,20 @@ jobs:
           rm -f /tmp/node.zip
 
           # ── 2. Install code-server npm package ──
-          # Strategy: install with --ignore-scripts to skip native module
-          # compilation (node-gyp needs Visual Studio Build Tools which
-          # aren't on the runner), then manually install VS Code's pure-JS
-          # dependencies that the postinstall script would have installed.
+          # Strategy:
+          #   a) Install code-server top-level with --ignore-scripts (fast extraction)
+          #   b) Install VS Code deps in lib/vscode/ WITHOUT --ignore-scripts
+          #      so native modules (@vscode/spdlog, @vscode/deviceid,
+          #      @vscode/windows-registry) get compiled via node-gyp.
+          #   c) Set GYP_MSVS_VERSION=2022 so node-gyp finds the VS 2022
+          #      Build Tools that are pre-installed on windows-latest.
           echo "Installing code-server@${{ env.CODE_SERVER_VERSION }}..."
           mkdir -p "$SIDECAR_DIR/code-server"
           cd "$SIDECAR_DIR/code-server"
 
           npm init -y > /dev/null 2>&1
-          # Install code-server WITHOUT running postinstall scripts.
-          # This skips node-gyp native compilation (which needs VS Build Tools).
+          # Top-level install WITH --ignore-scripts (just extracts files,
+          # no native compilation needed at this level).
           npm install "code-server@${{ env.CODE_SERVER_VERSION }}" --no-save --no-package-lock --ignore-scripts 2>&1 | tail -5
 
           cd - > /dev/null
@@ -119,23 +126,59 @@ jobs:
             exit 1
           fi
 
-          # ── 3. Install VS Code's pure-JS dependencies manually ──
-          # code-server's postinstall normally runs `cd lib/vscode && npm install`
-          # which installs ~300 deps including @microsoft/1ds-core-js.
-          # We replicate this with --ignore-scripts to skip native modules.
+          # ── 3. Install VS Code dependencies WITH native module compilation ──
+          # This is the critical step: we must NOT use --ignore-scripts here
+          # because VS Code has native C++ modules that must be compiled:
+          #   - @vscode/spdlog (spdlog.node — fast logging)
+          #   - @vscode/deviceid (windows.node — device identification)
+          #   - @vscode/windows-registry (winregistry.node — registry access)
+          # Without these .node binaries, code-server crashes with 500 errors.
+          #
+          # The windows-latest runner has Visual Studio 2022 Enterprise
+          # pre-installed. We set GYP_MSVS_VERSION=2022 so node-gyp finds it.
           VSCODE_DIR="$SIDECAR_DIR/code-server/node_modules/code-server/lib/vscode"
-          echo "Installing VS Code dependencies (with --ignore-scripts)..."
+          echo "Installing VS Code dependencies (WITH native module compilation)..."
+          echo "GYP_MSVS_VERSION=$GYP_MSVS_VERSION"
+
+          # Configure npm to use VS 2022 for node-gyp
+          npm config set msvs_version 2022
+
           cd "$VSCODE_DIR"
-          npm install --no-save --no-package-lock --ignore-scripts 2>&1 | tail -10
+          # Install WITHOUT --ignore-scripts so native modules compile.
+          # This will take ~3-5 minutes for node-gyp to compile C++ modules.
+          npm install --no-save --no-package-lock 2>&1 | tail -30
           cd - > /dev/null
 
-          # Verify @microsoft/1ds-core-js is now available
+          # Verify native modules were compiled
+          echo ""
+          echo "=== Verifying native modules ==="
+
+          SPDLOG_NODE=$(find "$VSCODE_DIR/node_modules/@vscode/spdlog" -name "spdlog.node" 2>/dev/null | head -1)
+          if [ -n "$SPDLOG_NODE" ]; then
+            echo "OK: spdlog.node found at $SPDLOG_NODE"
+          else
+            echo "WARNING: spdlog.node not found — code-server logging will be impaired"
+          fi
+
+          DEVICEID_NODE=$(find "$VSCODE_DIR/node_modules/@vscode/deviceid" -name "*.node" 2>/dev/null | head -1)
+          if [ -n "$DEVICEID_NODE" ]; then
+            echo "OK: deviceid native module found at $DEVICEID_NODE"
+          else
+            echo "WARNING: deviceid .node not found"
+          fi
+
+          REGISTRY_NODE=$(find "$VSCODE_DIR/node_modules/@vscode/windows-registry" -name "*.node" 2>/dev/null | head -1)
+          if [ -n "$REGISTRY_NODE" ]; then
+            echo "OK: windows-registry native module found at $REGISTRY_NODE"
+          else
+            echo "WARNING: windows-registry .node not found"
+          fi
+
+          # Verify @microsoft/1ds-core-js is available
           if [ -d "$VSCODE_DIR/node_modules/@microsoft/1ds-core-js" ]; then
             echo "OK: @microsoft/1ds-core-js installed successfully"
           else
-            echo "WARNING: @microsoft/1ds-core-js not found in lib/vscode/node_modules"
-            echo "Searching for it anywhere in the tree:"
-            find "$SIDECAR_DIR/code-server" -name "1ds-core-js" -type d 2>/dev/null | head -5
+            echo "WARNING: @microsoft/1ds-core-js not found"
           fi
 
           echo "code-server entry.js verified at: $ENTRY"

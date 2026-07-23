@@ -1,0 +1,141 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: build-windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The tauri-action needs contents:write to create GitHub releases on tag pushes.
+permissions:
+  contents: write
+  packages: write
+
+env:
+  RUST_VERSION: stable
+  NODE_VERSION: 22
+  PNPM_VERSION: 9.12.0
+  WINDOWS_TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  build:
+    name: Build JogiCode (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.WINDOWS_TARGET }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Download code-server Windows binary
+        shell: bash
+        run: |
+          mkdir -p src-tauri/binaries
+          # Get the latest code-server Windows release asset URL.
+          # code-server publishes a standalone .exe: code-server-{ver}-windows-amd64.exe
+          DOWNLOAD_URL=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/coder/code-server/releases/latest \
+            | jq -r '.assets[] | select(.name | test("windows-amd64")) | .browser_download_url')
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "ERROR: Could not find code-server Windows binary in latest release"
+            exit 1
+          fi
+
+          echo "Downloading code-server from: $DOWNLOAD_URL"
+          curl -sL "$DOWNLOAD_URL" \
+            -o src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe
+
+          # Verify the download is a valid PE executable (not an HTML error page)
+          FILE_SIZE=$(stat -c%s src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe 2>/dev/null || \
+                      wc -c < src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe)
+          echo "Downloaded binary size: ${FILE_SIZE} bytes"
+
+          if [ "$FILE_SIZE" -lt 1000000 ]; then
+            echo "ERROR: Downloaded file is too small (${FILE_SIZE} bytes) — likely an error page"
+            exit 1
+          fi
+
+          # Check first bytes for MZ header (PE executable magic)
+          HEAD=$(xxd -l 2 src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe | head -1)
+          echo "File header: $HEAD"
+          if ! echo "$HEAD" | grep -q "4d5a"; then
+            echo "ERROR: File does not have MZ (PE executable) header"
+            exit 1
+          fi
+
+          echo "code-server binary downloaded and verified successfully"
+          ls -la src-tauri/binaries/
+
+      - name: Ensure icons are valid RGBA
+        shell: bash
+        run: |
+          python3 src-tauri/scripts/make_icons.py
+          for f in src-tauri/icons/*.png; do
+            ct=$(python3 -c "
+          import struct
+          d=open('$f','rb').read()
+          assert d[:8]==b'\x89PNG\r\n\x1a\n','not a PNG'
+          print(struct.unpack('>IIBB', d[16:16+10])[3])
+          ")
+            if [ "$ct" != "6" ]; then
+              echo "ERROR: $f has color_type=$ct (must be 6=RGBA)"
+              exit 1
+            fi
+          done
+          echo "All icons are valid RGBA."
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts || pnpm install --ignore-scripts
+
+      - name: Build JogiCode (Tauri NSIS installer)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Only create a GitHub release when triggered by a v* tag push.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/v') && format('JogiCode {0}', github.ref_name) || '' }}
+          releaseBody: ${{ startsWith(github.ref, 'refs/tags/v') && format('JogiCode {0} — Lightweight Windows IDE powered by code-server.', github.ref_name) || '' }}
+          releaseDraft: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          prerelease: false
+          args: --target ${{ env.WINDOWS_TARGET }}
+
+      - name: Upload JogiCode installer artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JogiCode-windows-x64-installer
+          path: |
+            src-tauri/target/${{ env.WINDOWS_TARGET }}/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+          retention-days: 30

@@ -22,7 +22,9 @@ env:
   PNPM_VERSION: 9.12.0
   WINDOWS_TARGET: x86_64-pc-windows-msvc
   # Pin code-server version for reproducible builds.
-  CODE_SERVER_VERSION: "4.129.0"
+  # Note: npm 'code-server' package lags behind GitHub releases.
+  # Latest on npm as of 2026-07: 4.117.0
+  CODE_SERVER_VERSION: "4.117.0"
 
 jobs:
   build:

@@ -12,8 +12,9 @@ const TCP_POLL_TIMEOUT_SECS: u64 = 60;
 /// HTTP health check timeout after TCP port opens (seconds).
 const HTTP_HEALTH_TIMEOUT_SECS: u64 = 30;
 
-/// Thread-safe log file wrapper.
-type LogFile = Arc<Mutex<BufWriter<File>>>;
+/// Thread-safe log writer. Uses Box<dyn Write + Send> so it can hold
+/// either a real File or a no-op Sink as a fallback.
+type LogFile = Arc<Mutex<BufWriter<Box<dyn Write + Send>>>>;
 
 /// Write a timestamped log line to both console and the log file.
 fn log_line(log: &LogFile, msg: &str) {
@@ -197,19 +198,22 @@ fn resolve_sidecar_paths(
 fn spawn_code_server(
     app: &tauri::App,
     log: &LogFile,
+    log_path: &std::path::Path,
 ) -> Result<Child, String> {
     let (node_exe, cs_entry) = resolve_sidecar_paths(app, log)?;
 
-    // Clone the log file handles for code-server's stdout and stderr.
-    let log_handle = log
-        .lock()
-        .map_err(|e| format!("log lock: {}", e))?
-        .get_ref()
+    // Open the log file separately for code-server's stdout/stderr.
+    // We can't clone the Box<dyn Write> inside the LogFile, so we reopen
+    // the same file path. code-server's output will be interleaved with
+    // our Rust logs in the same file.
+    let stdout_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| format!("failed to open log file for code-server stdout: {}", e))?;
+    let stderr_file = stdout_file
         .try_clone()
-        .map_err(|e| format!("failed to clone log file: {}", e))?;
-    let stderr_handle = log_handle
-        .try_clone()
-        .map_err(|e| format!("failed to clone log file for stderr: {}", e))?;
+        .map_err(|e| format!("failed to clone log file for code-server stderr: {}", e))?;
 
     log_line(
         log,
@@ -292,12 +296,12 @@ pub fn run() {
                 Err(e) => {
                     eprintln!("[jogicode] FATAL: cannot open log file {:?}: {}", log_path, e);
                     // Fall back to a no-op logger (println only).
-                    Arc::new(Mutex::new(BufWriter::new(std::io::sink())))
+                    Arc::new(Mutex::new(BufWriter::new(Box::new(std::io::sink()) as Box<dyn Write + Send>)))
                 }
             };
 
             // Spawn code-server.
-            let child_result = spawn_code_server(app, &log);
+            let child_result = spawn_code_server(app, &log, &log_path);
             let child = match child_result {
                 Ok(child) => {
                     let pid = child.id();

@@ -11,16 +11,25 @@ and loads it in a native WebView — no browser needed, no separate terminal.
 ```
 JogiCode.exe (Tauri native window)
   ├── Rust main process
-  │     ├── Spawns code-server sidecar on startup (no console window)
+  │     ├── Spawns code-server via bundled node.exe (no console window)
   │     ├── Polls 127.0.0.1:8080 until code-server is ready
   │     ├── Navigates the WebView to http://127.0.0.1:8080
   │     └── Kills code-server process when the window closes
   │
   ├── app/index.html (splash screen — shown while code-server starts)
   │
-  └── code-server (bundled sidecar binary)
-        └── VS Code in the browser, with full extension support
+  └── Bundled sidecar (in resource dir)
+        ├── binaries/node.exe (Node.js portable Windows x64)
+        └── binaries/code-server/node_modules/code-server/ (npm package)
+              └── out/node/entry.js (entry point)
 ```
+
+### Why bundle Node.js + code-server npm?
+
+code-server does not publish a standalone Windows binary. The CI workflow
+downloads the official Node.js portable Windows x64 build and installs the
+code-server npm package, then bundles both as Tauri resources. Rust spawns
+`node.exe entry.js` at runtime — no system Node.js installation required.
 
 ### Why not just use a browser?
 
@@ -34,8 +43,8 @@ JogiCode.exe (Tauri native window)
 The GitHub Actions workflow (`.github/workflows/build-windows.yml`)
 automatically:
 
-1. Downloads the latest code-server Windows standalone binary
-2. Places it at `src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe`
+1. Downloads the official Node.js portable Windows x64 binary
+2. Installs code-server npm package (pinned version)
 3. Compiles the Tauri Rust shell
 4. Produces `JogiCode_x.y.z_x64-setup.exe` (NSIS installer)
 
@@ -46,21 +55,13 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-## Development
-
-```bash
-pnpm install
-# Download code-server manually for dev:
-#   Place code-server.exe at src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe
-pnpm tauri dev
-```
-
 ## Tech Stack
 
 | Component | Technology |
 |-----------|-----------|
 | Desktop shell | Tauri v2 (Rust) |
-| IDE backend | code-server (bundled sidecar) |
+| IDE backend | code-server v4.129.0 (npm package) |
+| JS runtime | Node.js portable (bundled, not system-installed) |
 | Frontend | Static HTML splash → code-server WebView |
 | Installer | NSIS (.exe) |
 | Target | Windows x86_64 only |

@@ -12,7 +12,6 @@ concurrency:
   group: build-windows-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# The tauri-action needs contents:write to create GitHub releases on tag pushes.
 permissions:
   contents: write
   packages: write
@@ -22,6 +21,8 @@ env:
   NODE_VERSION: 22
   PNPM_VERSION: 9.12.0
   WINDOWS_TARGET: x86_64-pc-windows-msvc
+  # Pin code-server version for reproducible builds.
+  CODE_SERVER_VERSION: "4.129.0"
 
 jobs:
   build:
@@ -55,46 +56,71 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Download code-server Windows binary
+      - name: Prepare code-server sidecar (Node.js portable + code-server npm)
         shell: bash
         run: |
-          mkdir -p src-tauri/binaries
-          # Get the latest code-server Windows release asset URL.
-          # code-server publishes a standalone .exe: code-server-{ver}-windows-amd64.exe
-          DOWNLOAD_URL=$(curl -sL \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/coder/code-server/releases/latest \
-            | jq -r '.assets[] | select(.name | test("windows-amd64")) | .browser_download_url')
+          set -euo pipefail
 
-          if [ -z "$DOWNLOAD_URL" ]; then
-            echo "ERROR: Could not find code-server Windows binary in latest release"
+          # ────────────────────────────────────────────────────────────────
+          # code-server does not publish a Windows standalone binary.
+          # We bundle:
+          #   1. Node.js portable Windows x64 binary (node.exe)
+          #   2. code-server npm package (installed into binaries/code-server/)
+          # Rust spawns: node.exe binaries/code-server/out/node/entry.js --bind-addr ...
+          # ────────────────────────────────────────────────────────────────
+
+          SIDECAR_DIR="src-tauri/binaries"
+          mkdir -p "$SIDECAR_DIR"
+
+          # ── 1. Download Node.js portable Windows x64 ──
+          # Get the Node.js version that matches our setup-node (v22.x)
+          NODE_VER=$(node --version)
+          echo "Using Node.js $NODE_VER"
+
+          # Download the Node.js Windows x64 zip from nodejs.org
+          NODE_URL="https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-win-x64.zip"
+          echo "Downloading Node.js portable from: $NODE_URL"
+
+          curl -sL "$NODE_URL" -o /tmp/node.zip
+          if [ ! -s /tmp/node.zip ]; then
+            echo "ERROR: Node.js download failed"
             exit 1
           fi
 
-          echo "Downloading code-server from: $DOWNLOAD_URL"
-          curl -sL "$DOWNLOAD_URL" \
-            -o src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe
+          # Extract just node.exe from the zip
+          unzip -j /tmp/node.zip "node-${NODE_VER}-win-x64/node.exe" -d "$SIDECAR_DIR/"
+          echo "node.exe extracted to $SIDECAR_DIR/"
+          ls -la "$SIDECAR_DIR/node.exe"
+          rm -f /tmp/node.zip
 
-          # Verify the download is a valid PE executable (not an HTML error page)
-          FILE_SIZE=$(stat -c%s src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe 2>/dev/null || \
-                      wc -c < src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe)
-          echo "Downloaded binary size: ${FILE_SIZE} bytes"
+          # ── 2. Install code-server npm package ──
+          echo "Installing code-server@${{ env.CODE_SERVER_VERSION }}..."
+          mkdir -p "$SIDECAR_DIR/code-server"
+          cd "$SIDECAR_DIR/code-server"
 
-          if [ "$FILE_SIZE" -lt 1000000 ]; then
-            echo "ERROR: Downloaded file is too small (${FILE_SIZE} bytes) — likely an error page"
+          # Create a minimal package.json and install code-server locally
+          npm init -y > /dev/null 2>&1
+          npm install "code-server@${{ env.CODE_SERVER_VERSION }}" --no-save --no-package-lock --ignore-scripts 2>&1 | tail -5
+
+          cd - > /dev/null
+
+          # Verify the entry point exists
+          ENTRY="$SIDECAR_DIR/code-server/node_modules/code-server/out/node/entry.js"
+          if [ ! -f "$ENTRY" ]; then
+            echo "ERROR: code-server entry.js not found at $ENTRY"
+            echo "Listing code-server dir:"
+            find "$SIDECAR_DIR/code-server" -name "entry.js" 2>/dev/null | head -5
             exit 1
           fi
 
-          # Check first bytes for MZ header (PE executable magic)
-          HEAD=$(xxd -l 2 src-tauri/binaries/code-server-x86_64-pc-windows-msvc.exe | head -1)
-          echo "File header: $HEAD"
-          if ! echo "$HEAD" | grep -q "4d5a"; then
-            echo "ERROR: File does not have MZ (PE executable) header"
-            exit 1
-          fi
+          echo "code-server entry.js verified at: $ENTRY"
+          echo ""
 
-          echo "code-server binary downloaded and verified successfully"
-          ls -la src-tauri/binaries/
+          # ── 3. Summary ──
+          echo "=== Sidecar contents ==="
+          find "$SIDECAR_DIR" -maxdepth 2 -type f | head -20
+          echo "..."
+          echo "Total sidecar size: $(du -sh "$SIDECAR_DIR" | cut -f1)"
 
       - name: Ensure icons are valid RGBA
         shell: bash
@@ -122,7 +148,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # Only create a GitHub release when triggered by a v* tag push.
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/v') && format('JogiCode {0}', github.ref_name) || '' }}
           releaseBody: ${{ startsWith(github.ref, 'refs/tags/v') && format('JogiCode {0} — Lightweight Windows IDE powered by code-server.', github.ref_name) || '' }}

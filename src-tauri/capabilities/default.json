@@ -1,11 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "JogiCode default capabilities — allows spawning the code-server sidecar.",
+  "description": "JogiCode default capabilities.",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    "shell:allow-execute",
-    "shell:allow-spawn"
+    "core:default"
   ]
 }

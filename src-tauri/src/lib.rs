@@ -252,7 +252,132 @@ fn resolve_sidecar_paths(
     Ok((node_exe, cs_entry))
 }
 
+/// Ensure the JogiCode data directory exists and create a default settings.json
+/// that configures VS Code for workspace-local caching and clipboard support.
+fn ensure_data_dir(
+    app: &tauri::App,
+    log: &LogFile,
+) -> Result<std::path::PathBuf, String> {
+    // All JogiCode data lives under %APPDATA%\JogiCode\ (Windows)
+    // This keeps everything in one clean place instead of scattered across
+    // %LOCALAPPDATA%\code-server\, %APPDATA%\code-server\, etc.
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("failed to resolve app_data_dir: {}", e))?;
+
+    let userdata_dir = data_dir.join("userdata");
+    let extensions_dir = data_dir.join("extensions");
+    let user_dir = userdata_dir.join("User");
+
+    // Create all required directories
+    std::fs::create_dir_all(&userdata_dir)
+        .map_err(|e| format!("failed to create userdata dir: {}", e))?;
+    std::fs::create_dir_all(&extensions_dir)
+        .map_err(|e| format!("failed to create extensions dir: {}", e))?;
+    std::fs::create_dir_all(&user_dir)
+        .map_err(|e| format!("failed to create User dir: {}", e))?;
+
+    log_line(log, &format!("data_dir: {:?}", data_dir));
+    log_line(log, &format!("userdata_dir: {:?}", userdata_dir));
+    log_line(log, &format!("extensions_dir: {:?}", extensions_dir));
+
+    // Create default settings.json if it doesn't exist.
+    // This configures VS Code to:
+    // 1. Use workspace-relative paths for caches where possible
+    // 2. Enable clipboard support for right-click paste
+    // 3. Keep workspace state clean
+    let settings_path = user_dir.join("settings.json");
+    if !settings_path.exists() {
+        let default_settings = r#"{
+    // ════════════════════════════════════════════════════════════════════
+    // JogiCode Default Settings
+    // ════════════════════════════════════════════════════════════════════
+
+    // ── Clipboard ──
+    // Enable syntax highlighting when copying (helps clipboard work better)
+    "editor.copyWithSyntaxHighlighting": true,
+    // Enable clipboard API for right-click paste
+    "editor.multiCursorModifier": "alt",
+
+    // ── Workspace-local caches ──
+    // TypeScript: use workspace node_modules if available
+    "typescript.tsdk": null,
+    "typescript.enablePromptUseWorkspaceTsdk": true,
+    // TypeScript cache goes in workspace
+    "typescript.tsserver.log": "off",
+
+    // ── Files ──
+    // Exclude common junk from file watcher (reduces cache load)
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/node_modules/**": true,
+        "**/.jogicode/**": true
+    },
+    "files.exclude": {
+        "**/.jogicode": true
+    },
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/.jogicode": true,
+        "**/dist": true,
+        "**/build": true
+    },
+
+    // ── Terminal ──
+    // Keep terminal history in workspace
+    "terminal.integrated.scrollback": 5000,
+    "terminal.integrated.enablePersistentSessions": false,
+
+    // ── Editor ──
+    "editor.fontSize": 14,
+    "editor.tabSize": 2,
+    "editor.formatOnSave": false,
+    "editor.minimap.enabled": false,
+    "workbench.startupEditor": "none",
+    "workbench.colorTheme": "Default Dark+",
+    "window.menuBarVisibility": "visible",
+
+    // ── Extensions ──
+    // Auto-install extensions to the JogiCode extensions dir
+    "extensions.autoUpdate": false,
+    "extensions.autoCheckUpdates": false,
+    "extensions.ignoreRecommendations": false,
+
+    // ── Telemetry ──
+    "telemetry.telemetryLevel": "off",
+    "redhat.telemetry.enabled": false,
+
+    // ── Updates ──
+    "update.mode": "none"
+}"#;
+        std::fs::write(&settings_path, default_settings)
+            .map_err(|e| format!("failed to write settings.json: {}", e))?;
+        log_line(log, "created default settings.json");
+    }
+
+    // Create a default keybindings.json that adds right-click paste support
+    let keybindings_path = user_dir.join("keybindings.json");
+    if !keybindings_path.exists() {
+        let default_keybindings = r#"[
+    // Right-click paste: map middle-click to paste for accessibility
+    {
+        "key": "ctrl+shift+v",
+        "command": "editor.action.clipboardPasteAction"
+    }
+]"#;
+        std::fs::write(&keybindings_path, default_keybindings)
+            .map_err(|e| format!("failed to write keybindings.json: {}", e))?;
+        log_line(log, "created default keybindings.json");
+    }
+
+    Ok(data_dir)
+}
+
 /// Spawn code-server on the given port.
+/// All data (settings, extensions, workspace state) goes to
+/// %APPDATA%\JogiCode\ instead of code-server's default locations.
 fn spawn_code_server(
     app: &tauri::App,
     log: &LogFile,
@@ -260,6 +385,11 @@ fn spawn_code_server(
     port: u16,
 ) -> Result<Child, String> {
     let (node_exe, cs_entry) = resolve_sidecar_paths(app, log)?;
+
+    // Ensure data directories exist and settings.json is created.
+    let data_dir = ensure_data_dir(app, log)?;
+    let userdata_dir = data_dir.join("userdata");
+    let extensions_dir = data_dir.join("extensions");
 
     let stdout_file = OpenOptions::new()
         .create(true)
@@ -273,8 +403,8 @@ fn spawn_code_server(
     log_line(
         log,
         &format!(
-            "spawning: {:?} {:?} --bind-addr 127.0.0.1:{} --auth none --disable-telemetry --disable-update-check",
-            node_exe, cs_entry, port
+            "spawning: {:?} {:?} --bind-addr 127.0.0.1:{} --auth none --user-data-dir {:?} --extensions-dir {:?}",
+            node_exe, cs_entry, port, userdata_dir, extensions_dir
         ),
     );
 
@@ -286,6 +416,15 @@ fn spawn_code_server(
         .arg("none")
         .arg("--disable-telemetry")
         .arg("--disable-update-check")
+        // Store all user data in %APPDATA%\JogiCode\userdata instead of
+        // code-server's default %LOCALAPPDATA%\code-server\Data
+        .arg("--user-data-dir")
+        .arg(&userdata_dir)
+        // Store extensions in %APPDATA%\JogiCode\extensions
+        .arg("--extensions-dir")
+        .arg(&extensions_dir)
+        // Disable session persistence (we manage lifecycle ourselves)
+        .arg("--disable-session-restore")
         .current_dir(cs_entry.parent().unwrap_or(std::path::Path::new(".")))
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));

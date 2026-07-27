@@ -196,6 +196,26 @@ jobs:
           echo "..."
           echo "Total sidecar size: $(du -sh "$SIDECAR_DIR" | cut -f1)"
 
+      - name: Prune Windows Bundle (Optimization — without npm prune)
+        shell: pwsh
+        run: |
+          .\.github\scripts\prune-windows.ps1
+
+      - name: Verify code-server survived pruning
+        shell: bash
+        run: |
+          # CRITICAL: verify that the prune script didn't delete code-server.
+          # This check prevents shipping a broken installer (v1.0.5-v1.0.9 bug).
+          ENTRY="src-tauri/binaries/code-server/node_modules/code-server/out/node/entry.js"
+          if [ ! -f "$ENTRY" ]; then
+            echo "FATAL: code-server entry.js was deleted by the prune script!"
+            echo "This is the v1.0.5-v1.0.9 bug — do not ship this build."
+            echo "Searching for entry.js anywhere:"
+            find src-tauri/binaries/code-server -name "entry.js" 2>/dev/null | head -5
+            exit 1
+          fi
+          echo "OK: code-server entry.js survived pruning — safe to build"
+
       - name: Ensure icons are valid RGBA
         shell: bash
         run: |

@@ -1,6 +1,6 @@
 {
   "name": "jogicode",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "private": true,
   "description": "JogiCode — Lightweight Windows IDE powered by code-server",
   "license": "MIT",

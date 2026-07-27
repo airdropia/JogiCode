@@ -252,6 +252,155 @@ fn resolve_sidecar_paths(
     Ok((node_exe, cs_entry))
 }
 
+/// Recursively copy a directory and its contents.
+/// Skips files that already exist in the destination (no overwrite).
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path, log: &LogFile) -> Result<u64, String> {
+    if !src.is_dir() {
+        return Err(format!("source is not a directory: {:?}", src));
+    }
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("failed to create dst dir {:?}: {}", dst, e))?;
+
+    let mut copied: u64 = 0;
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| format!("failed to read src dir {:?}: {}", src, e))?
+        .flatten()
+    {
+        let src_path = entry.path();
+        let file_name = entry.file_name();
+        let dst_path = dst.join(&file_name);
+
+        if src_path.is_dir() {
+            // Recurse into subdirectory
+            match copy_dir_recursive(&src_path, &dst_path, log) {
+                Ok(n) => copied += n,
+                Err(e) => {
+                    log_line(log, &format!("  skip subdir {:?}: {}", src_path, e));
+                }
+            }
+        } else {
+            // Copy file if it doesn't already exist in destination
+            if !dst_path.exists() {
+                if let Err(e) = std::fs::copy(&src_path, &dst_path) {
+                    log_line(log, &format!("  skip file {:?}: {}", src_path, e));
+                } else {
+                    copied += 1;
+                }
+            }
+        }
+    }
+    Ok(copied)
+}
+
+/// Migrate data from old code-server default locations to the new
+/// %APPDATA%\JogiCode\ location.
+///
+/// Before v1.0.7, JogiCode used code-server's default paths:
+///   %LOCALAPPDATA%\code-server\Data\          (user data)
+///   %USERPROFILE%\.vscode\extensions\         (extensions, maybe)
+///
+/// Starting v1.0.7, all data goes to:
+///   %APPDATA%\JogiCode\userdata\
+///   %APPDATA%\JogiCode\extensions\
+///
+/// This function checks if the old locations have data and the new
+/// location is empty (first migration). If so, it copies the old data
+/// to the new location so users don't lose their settings, extensions
+/// (like Kilo Code), and workspace state.
+fn migrate_old_data(
+    new_userdata_dir: &std::path::Path,
+    new_extensions_dir: &std::path::Path,
+    log: &LogFile,
+) {
+    use std::env;
+
+    // ── Old user-data-dir locations ──
+    // code-server defaults to %LOCALAPPDATA%\code-server\Data
+    let old_userdata_candidates: Vec<std::path::PathBuf> = {
+        let mut v = Vec::new();
+        if let Ok(local_appdata) = env::var("LOCALAPPDATA") {
+            v.push(std::path::PathBuf::from(&local_appdata).join("code-server").join("Data"));
+            // Some code-server versions use this path
+            v.push(std::path::PathBuf::from(&local_appdata).join("code-server"));
+        }
+        v
+    };
+
+    // ── Old extensions locations ──
+    // code-server may store extensions in the user-data-dir/Extensions
+    // or in %USERPROFILE%\.vscode\extensions
+    let old_extensions_candidates: Vec<std::path::PathBuf> = {
+        let mut v = Vec::new();
+        if let Ok(local_appdata) = env::var("LOCALAPPDATA") {
+            v.push(
+                std::path::PathBuf::from(&local_appdata)
+                    .join("code-server")
+                    .join("Data")
+                    .join("extensions"),
+            );
+            v.push(
+                std::path::PathBuf::from(&local_appdata)
+                    .join("code-server")
+                    .join("extensions"),
+            );
+        }
+        if let Ok(userprofile) = env::var("USERPROFILE") {
+            v.push(std::path::PathBuf::from(&userprofile).join(".vscode").join("extensions"));
+        }
+        v
+    };
+
+    // ── Migrate user data if new location is empty ──
+    let new_userdata_is_empty = std::fs::read_dir(new_userdata_dir)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true);
+
+    if new_userdata_is_empty {
+        log_line(log, "checking for old code-server user data to migrate...");
+        for old_dir in &old_userdata_candidates {
+            if old_dir.is_dir() {
+                log_line(log, &format!("found old user data at {:?}", old_dir));
+                match copy_dir_recursive(old_dir, new_userdata_dir, log) {
+                    Ok(count) => {
+                        log_line(log, &format!("migrated {} files from {:?} to {:?}", count, old_dir, new_userdata_dir));
+                        break;
+                    }
+                    Err(e) => {
+                        log_line(log, &format!("migration of {:?} failed: {}", old_dir, e));
+                    }
+                }
+            }
+        }
+    } else {
+        log_line(log, "new user data dir is not empty, skipping migration");
+    }
+
+    // ── Migrate extensions if new location is empty ──
+    let new_extensions_is_empty = std::fs::read_dir(new_extensions_dir)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true);
+
+    if new_extensions_is_empty {
+        log_line(log, "checking for old code-server extensions to migrate...");
+        for old_dir in &old_extensions_candidates {
+            if old_dir.is_dir() {
+                log_line(log, &format!("found old extensions at {:?}", old_dir));
+                match copy_dir_recursive(old_dir, new_extensions_dir, log) {
+                    Ok(count) => {
+                        log_line(log, &format!("migrated {} extension files from {:?} to {:?}", count, old_dir, new_extensions_dir));
+                        break;
+                    }
+                    Err(e) => {
+                        log_line(log, &format!("migration of extensions {:?} failed: {}", old_dir, e));
+                    }
+                }
+            }
+        }
+    } else {
+        log_line(log, "new extensions dir is not empty, skipping migration");
+    }
+}
+
 /// Ensure the JogiCode data directory exists and create a default settings.json
 /// that configures VS Code for workspace-local caching and clipboard support.
 fn ensure_data_dir(
@@ -281,6 +430,11 @@ fn ensure_data_dir(
     log_line(log, &format!("data_dir: {:?}", data_dir));
     log_line(log, &format!("userdata_dir: {:?}", userdata_dir));
     log_line(log, &format!("extensions_dir: {:?}", extensions_dir));
+
+    // ── Migrate old data BEFORE creating default settings ──
+    // This copies old code-server data (including installed extensions
+    // like Kilo Code) to the new JogiCode location.
+    migrate_old_data(&userdata_dir, &extensions_dir, log);
 
     // Create default settings.json if it doesn't exist.
     // This configures VS Code to:

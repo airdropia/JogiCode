@@ -391,14 +391,14 @@ fn spawn_code_server(
     let userdata_dir = data_dir.join("userdata");
     let extensions_dir = data_dir.join("extensions");
 
+    // Open the log file for code-server's stdout.
+    // stderr is piped (not redirected to file) so we can capture and log
+    // code-server's error messages when it crashes.
     let stdout_file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_path)
         .map_err(|e| format!("failed to open log file for code-server stdout: {}", e))?;
-    let stderr_file = stdout_file
-        .try_clone()
-        .map_err(|e| format!("failed to clone log file for code-server stderr: {}", e))?;
 
     log_line(
         log,
@@ -423,11 +423,13 @@ fn spawn_code_server(
         // Store extensions in %APPDATA%\JogiCode\extensions
         .arg("--extensions-dir")
         .arg(&extensions_dir)
-        // Disable session persistence (we manage lifecycle ourselves)
-        .arg("--disable-session-restore")
         .current_dir(cs_entry.parent().unwrap_or(std::path::Path::new(".")))
         .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file));
+        // Pipe stderr so we can read code-server's error messages when
+        // it crashes. Previously this went to a file, but the output
+        // wasn't visible until the process fully exited. With a pipe,
+        // we can read stderr in the premature-exit checker thread.
+        .stderr(Stdio::piped());
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -514,14 +516,21 @@ pub fn run() {
             // Spawn code-server on the dynamic port.
             let child_result = spawn_code_server(app, &log, &log_path, port);
             let child = match child_result {
-                Ok(child) => {
+                Ok(mut child) => {
                     let pid = child.id();
                     log_line(&log, &format!("code-server spawned (pid={}, port={})", pid, port));
+
+                    // Take the stderr pipe so we can read code-server's error
+                    // messages if it crashes.
+                    let stderr = child.stderr.take();
                     let child_check = Arc::new(Mutex::new(Some(child)));
                     let child_for_check = child_check.clone();
                     let log_for_check = log.clone();
+
                     std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_secs(2));
+                        // Give code-server 3 seconds to start (or crash).
+                        std::thread::sleep(Duration::from_secs(3));
+
                         if let Ok(mut guard) = child_for_check.lock() {
                             if let Some(ref mut child) = *guard {
                                 match child.try_wait() {
@@ -530,9 +539,22 @@ pub fn run() {
                                             "code-server exited prematurely with status: {:?}",
                                             status
                                         ));
+
+                                        // Read stderr output to see WHY it crashed.
+                                        if let Some(mut stderr) = stderr {
+                                            use std::io::Read;
+                                            let mut buf = String::new();
+                                            let _ = stderr.read_to_string(&mut buf);
+                                            if !buf.is_empty() {
+                                                // Log each line of stderr separately for clarity.
+                                                for line in buf.lines() {
+                                                    log_line(&log_for_check, &format!("code-server stderr: {}", line));
+                                                }
+                                            }
+                                        }
                                     }
                                     Ok(None) => {
-                                        log_line(&log_for_check, "code-server process is still running after 2s");
+                                        log_line(&log_for_check, "code-server process is still running after 3s");
                                     }
                                     Err(e) => {
                                         log_line(&log_for_check, &format!(

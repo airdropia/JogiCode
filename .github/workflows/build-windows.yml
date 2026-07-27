@@ -116,11 +116,38 @@ jobs:
           mkdir -p "$SIDECAR_DIR/code-server"
           cd "$SIDECAR_DIR/code-server"
 
-          npm init -y > /dev/null 2>&1
-          # Install code-server WITH --save (adds to package.json dependencies).
+          # Create package.json MANUALLY with a unique name (not "code-server").
+          # If we use `npm init -y`, the package name becomes "code-server" (from
+          # the directory name), and `npm install code-server --save` gets confused
+          # because the package itself is named "code-server". This causes --save
+          # to not work properly, and npm prune --production later deletes
+          # code-server from node_modules.
+          cat > package.json <<'PKGJSON'
+{
+  "name": "jogicode-sidecar",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {}
+}
+PKGJSON
+
+          # Install code-server WITH --save (adds to dependencies in package.json).
           # This is critical: npm prune --production later will keep code-server
-          # because it's in package.json. Without --save, npm prune deletes it.
+          # because it's in package.json dependencies.
           npm install "code-server@${{ env.CODE_SERVER_VERSION }}" --save --no-package-lock --ignore-scripts 2>&1 | tail -5
+
+          # Verify code-server was added to package.json dependencies
+          echo "=== package.json after install ==="
+          cat package.json
+          echo ""
+
+          # Verify code-server is in dependencies
+          if ! grep -q '"code-server"' package.json; then
+            echo "FATAL: code-server not found in package.json dependencies!"
+            echo "npm install --save did not work correctly."
+            exit 1
+          fi
+          echo "OK: code-server is in package.json dependencies"
 
           cd - > /dev/null
 
@@ -205,11 +232,12 @@ jobs:
       - name: Verify code-server survived pruning
         shell: bash
         run: |
+          set +e  # Don't exit on error — we want to see the find output
           # CRITICAL: verify that the prune script didn't delete code-server.
           ENTRY="src-tauri/binaries/code-server/node_modules/code-server/out/node/entry.js"
           if [ ! -f "$ENTRY" ]; then
             echo "FATAL: code-server entry.js was deleted by the prune script!"
-            find src-tauri/binaries/code-server -name "entry.js" 2>/dev/null | head -5
+            find src-tauri/binaries/code-server -name "entry.js" 2>/dev/null
             exit 1
           fi
           echo "OK: code-server entry.js survived pruning — safe to build"
@@ -220,7 +248,7 @@ jobs:
           du -sh src-tauri/binaries/ || true
           echo ""
           echo "=== Top 20 largest items ==="
-          find src-tauri/binaries/ -type f -exec du -h {} + 2>/dev/null | sort -rh | head -20
+          find src-tauri/binaries/ -type f -exec du -h {} + 2>/dev/null | sort -rh | head -20 || true
 
       - name: Ensure icons are valid RGBA
         shell: bash

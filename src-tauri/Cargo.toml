@@ -1,6 +1,6 @@
 [package]
 name = "jogicode"
-version = "1.0.12"
+version = "1.0.13"
 description = "JogiCode — Lightweight Windows IDE powered by code-server"
 authors = ["JogiCode"]
 edition = "2021"

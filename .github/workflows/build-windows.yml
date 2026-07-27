@@ -196,11 +196,6 @@ jobs:
           echo "..."
           echo "Total sidecar size: $(du -sh "$SIDECAR_DIR" | cut -f1)"
 
-      - name: Prune Windows Bundle (Optimization)
-        shell: pwsh
-        run: |
-          .\.github\scripts\prune-windows.ps1
-
       - name: Ensure icons are valid RGBA
         shell: bash
         run: |

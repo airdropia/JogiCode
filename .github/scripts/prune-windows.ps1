@@ -105,6 +105,40 @@ if (Test-Path $codeServerPath) {
 }
 
 # -------------------------------------------------------
+# 9b. Remove GitHub Copilot agent binaries (106MB!)
+# -------------------------------------------------------
+# VS Code bundles @github/copilot-win32-x64/copilot.exe (106MB) as a
+# dependency. This is NOT needed — Copilot can be installed as an
+# extension if the user wants it. Removing this saves ~106MB.
+Write-Host "[9b] Removing GitHub Copilot agent binaries..." -ForegroundColor Yellow
+$copilotPaths = @(
+    "$codeServerPath/node_modules/code-server/lib/vscode/node_modules/@github"
+    "$codeServerPath/node_modules/@github"
+)
+foreach ($p in $copilotPaths) {
+    if (Test-Path $p) {
+        $size = (Get-ChildItem -Path $p -Recurse -File | Measure-Object -Property Length -Sum).Sum
+        $sizeMB = [math]::Round($size / 1MB, 2)
+        Write-Host "  Removing $p ($sizeMB MB)"
+        Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# -------------------------------------------------------
+# 9c. Remove other large unnecessary agent/language server binaries
+# -------------------------------------------------------
+Write-Host "[9c] Removing other large unnecessary binaries..." -ForegroundColor Yellow
+# Remove ripgrep source tarball (if any)
+$rgExtras = Get-ChildItem -Path "$codeServerPath/node_modules/vscode-ripgrep" -Include "*.tar.gz","*.zip" -Recurse -File -ErrorAction SilentlyContinue
+foreach ($f in $rgExtras) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue }
+
+# Remove node-gyp cache
+$nodeGypCache = "$env:USERPROFILE\.node-gyp"
+if (Test-Path $nodeGypCache) {
+    Remove-Item -Path $nodeGypCache -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# -------------------------------------------------------
 # 10. Remove .bin directories in node_modules (CLI symlinks, not needed at runtime)
 # -------------------------------------------------------
 Write-Host "[10] Removing .bin directories..." -ForegroundColor Yellow

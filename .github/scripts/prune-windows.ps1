@@ -50,17 +50,27 @@ foreach ($folder in $foldersToRemove) {
 }
 
 # -------------------------------------------------------
-# 6. SKIPPED: npm prune --production
+# 6. Remove devDependencies (npm prune --production)
 # -------------------------------------------------------
-# This step was REMOVED because it deletes code-server itself!
-# code-server is installed with --no-save, so npm considers it an
-# "extraneous" package and removes it during prune --production.
-# This caused v1.0.5-v1.0.9 to ship with an empty code-server dir.
-#
-# The other pruning steps (1-5, 7-9) are safe and remove ~180MB of
-# non-Windows binaries, source maps, C++ source, test folders, etc.
-# That brings the installer from ~200MB to ~23MB without breaking
-# code-server.
+# This is SAFE now because code-server was installed with --save,
+# so it's in package.json dependencies. npm prune --production only
+# removes devDependencies (test/build tools), NOT code-server itself.
+# This removes ~150MB of devDependencies.
+Write-Host "[6] Pruning devDependencies..." -ForegroundColor Yellow
+if (Test-Path $codeServerPath) {
+    Push-Location $codeServerPath
+    npm prune --production 2>&1 | Write-Host
+    Pop-Location
+}
+
+# Also prune devDependencies from VS Code's node_modules
+$vscodePath = "$codeServerPath/node_modules/code-server/lib/vscode"
+if (Test-Path $vscodePath) {
+    Write-Host "[6b] Pruning VS Code devDependencies..." -ForegroundColor Yellow
+    Push-Location $vscodePath
+    npm prune --production 2>&1 | Write-Host
+    Pop-Location
+}
 
 # -------------------------------------------------------
 # 7. Remove non-Windows native .node files

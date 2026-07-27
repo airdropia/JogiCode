@@ -117,9 +117,10 @@ jobs:
           cd "$SIDECAR_DIR/code-server"
 
           npm init -y > /dev/null 2>&1
-          # Top-level install WITH --ignore-scripts (just extracts files,
-          # no native compilation needed at this level).
-          npm install "code-server@${{ env.CODE_SERVER_VERSION }}" --no-save --no-package-lock --ignore-scripts 2>&1 | tail -5
+          # Install code-server WITH --save (adds to package.json dependencies).
+          # This is critical: npm prune --production later will keep code-server
+          # because it's in package.json. Without --save, npm prune deletes it.
+          npm install "code-server@${{ env.CODE_SERVER_VERSION }}" --save --no-package-lock --ignore-scripts 2>&1 | tail -5
 
           cd - > /dev/null
 

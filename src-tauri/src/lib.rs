@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,7 +14,6 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-const CODE_SERVER_PORT: u16 = 8080;
 /// TCP port polling timeout (seconds).
 const TCP_POLL_TIMEOUT_SECS: u64 = 60;
 /// HTTP health check timeout after TCP port opens (seconds).
@@ -31,6 +30,52 @@ fn log_line(log: &LogFile, msg: &str) {
     if let Ok(mut writer) = log.lock() {
         let _ = writeln!(writer, "{}", line);
         let _ = writer.flush();
+    }
+}
+
+/// Find a free TCP port on 127.0.0.1.
+///
+/// Binds a TcpListener to port 0 (which tells the OS to assign a free
+/// port), reads the assigned port, then drops the listener.
+///
+/// This fixes the `EACCES: permission denied` error that occurs when
+/// Windows (Hyper-V, WSL2, Docker) dynamically reserves port ranges
+/// that include hardcoded ports like 8080. After a reboot or Hyper-V
+/// restart, previously-working ports can become reserved.
+///
+/// There is a tiny race window between dropping the listener and
+/// code-server binding to it, but in practice this is microseconds
+/// and the OS won't reassign the port that quickly.
+fn find_free_port(log: &LogFile) -> Result<u16, String> {
+    // Try preferred ports first (8080, 8081, 8082) for familiarity.
+    // If none are available, let the OS pick a random port.
+    let preferred = [8080u16, 8081, 8082, 8083, 8084, 8085];
+
+    for &port in &preferred {
+        match TcpListener::bind(format!("127.0.0.1:{}", port)) {
+            Ok(listener) => {
+                log_line(log, &format!("found free preferred port: {}", port));
+                drop(listener);
+                return Ok(port);
+            }
+            Err(e) => {
+                log_line(log, &format!("preferred port {} not available: {}", port, e));
+            }
+        }
+    }
+
+    // Fall back to OS-assigned random port.
+    match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => {
+            let port = listener
+                .local_addr()
+                .map_err(|e| format!("failed to get local addr: {}", e))?
+                .port();
+            log_line(log, &format!("OS assigned random port: {}", port));
+            drop(listener);
+            Ok(port)
+        }
+        Err(e) => Err(format!("failed to bind to any port: {}", e)),
     }
 }
 
@@ -97,7 +142,6 @@ fn http_health_check(port: u16, timeout_secs: u64, log: &LogFile) -> bool {
 }
 
 /// Recursively search for a file matching `name` under `dir`.
-/// Used as a fallback if the expected entry.js path doesn't exist.
 fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
     if !dir.is_dir() {
         return None;
@@ -116,22 +160,12 @@ fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Strip the Windows UNC `\\?\` prefix from a path.
-///
-/// `Path::canonicalize()` on Windows returns UNC paths like
-/// `\\?\C:\Program Files\JogiCode\binaries\node.exe`. Node.js's
-/// `internal/modules/cjs/loader.js` calls `realpathSync()` which
-/// fails on this prefix with `EISDIR: illegal operation on a
-/// directory, lstat 'C:'`.
-///
-/// Stripping the `\\?\` prefix gives a regular Windows path that
-/// Node.js can resolve correctly.
 fn strip_unc_prefix(path: &std::path::Path) -> std::path::PathBuf {
     let s = path.to_string_lossy();
     if s.starts_with(r"\\?\") {
         let stripped = &s[4..];
         std::path::PathBuf::from(stripped)
     } else if s.starts_with(r"\\?\UNC\") {
-        // UNC network path: \\?\UNC\server\share -> \\server\share
         let stripped = &s[7..];
         std::path::PathBuf::from(format!(r"\\{}", stripped))
     } else {
@@ -140,10 +174,6 @@ fn strip_unc_prefix(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Resolve the path to the bundled node.exe and code-server entry point.
-/// Uses canonicalize() for absolute Windows paths, and falls back to
-/// recursive search if the expected entry.js path doesn't exist.
-/// The `\\?\` UNC prefix from canonicalize() is stripped because Node.js
-/// module resolution breaks on it.
 fn resolve_sidecar_paths(
     app: &tauri::App,
     log: &LogFile,
@@ -157,7 +187,6 @@ fn resolve_sidecar_paths(
 
     let binaries_dir = resource_dir.join("binaries");
 
-    // List the contents of binaries/ for debugging.
     if let Ok(entries) = std::fs::read_dir(&binaries_dir) {
         let contents: Vec<String> = entries
             .flatten()
@@ -166,7 +195,6 @@ fn resolve_sidecar_paths(
         log_line(log, &format!("binaries/ contents: {:?}", contents));
     }
 
-    // node.exe
     let node_exe = binaries_dir.join("node.exe");
     log_line(log, &format!("node.exe path: {:?}", node_exe));
     if !node_exe.exists() {
@@ -178,18 +206,14 @@ fn resolve_sidecar_paths(
     let node_exe = strip_unc_prefix(&node_exe);
     log_line(log, &format!("node.exe canonical (UNC stripped): {:?}", node_exe));
 
-    // code-server entry.js — try multiple known locations.
     let cs_base = binaries_dir.join("code-server");
     let candidate_paths = [
-        // Standard npm install location:
-        // binaries/code-server/node_modules/code-server/out/node/entry.js
         cs_base
             .join("node_modules")
             .join("code-server")
             .join("out")
             .join("node")
             .join("entry.js"),
-        // Alternative: if code-server was installed globally or differently
         cs_base.join("out").join("node").join("entry.js"),
     ];
 
@@ -203,7 +227,6 @@ fn resolve_sidecar_paths(
         }
     }
 
-    // Fallback: recursive search for entry.js under binaries/code-server/
     if cs_entry.is_none() {
         log_line(log, "entry.js not found at expected paths, searching recursively...");
         if let Some(found) = find_file(&cs_base, "entry.js") {
@@ -229,19 +252,15 @@ fn resolve_sidecar_paths(
     Ok((node_exe, cs_entry))
 }
 
-/// Spawn code-server: node.exe entry.js --bind-addr 127.0.0.1:8080 --auth none ...
-/// code-server stdout/stderr are piped to the log file.
+/// Spawn code-server on the given port.
 fn spawn_code_server(
     app: &tauri::App,
     log: &LogFile,
     log_path: &std::path::Path,
+    port: u16,
 ) -> Result<Child, String> {
     let (node_exe, cs_entry) = resolve_sidecar_paths(app, log)?;
 
-    // Open the log file separately for code-server's stdout/stderr.
-    // We can't clone the Box<dyn Write> inside the LogFile, so we reopen
-    // the same file path. code-server's output will be interleaved with
-    // our Rust logs in the same file.
     let stdout_file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -255,25 +274,22 @@ fn spawn_code_server(
         log,
         &format!(
             "spawning: {:?} {:?} --bind-addr 127.0.0.1:{} --auth none --disable-telemetry --disable-update-check",
-            node_exe, cs_entry, CODE_SERVER_PORT
+            node_exe, cs_entry, port
         ),
     );
 
     let mut cmd = Command::new(&node_exe);
     cmd.arg(&cs_entry)
         .arg("--bind-addr")
-        .arg(format!("127.0.0.1:{}", CODE_SERVER_PORT))
+        .arg(format!("127.0.0.1:{}", port))
         .arg("--auth")
         .arg("none")
         .arg("--disable-telemetry")
         .arg("--disable-update-check")
-        // Set working directory to code-server's directory so Node.js
-        // can resolve its node_modules and relative imports.
         .current_dir(cs_entry.parent().unwrap_or(std::path::Path::new(".")))
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));
 
-    // Prevent a CMD/console window from appearing on Windows.
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
@@ -310,15 +326,12 @@ fn update_ui_status(window: &tauri::WebviewWindow, message: &str) {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // Open a log file in the per-user app data directory.
-            // Windows: %APPDATA%\com.jogicode.app\jogicode.log
             let log_path = app
                 .path()
                 .app_data_dir()
                 .map(|d| d.join("jogicode.log"))
                 .unwrap_or_else(|_| std::env::temp_dir().join("jogicode.log"));
 
-            // Ensure parent dir exists.
             if let Some(parent) = log_path.parent() {
                 if !parent.exists() {
                     let _ = std::fs::create_dir_all(parent);
@@ -339,26 +352,37 @@ pub fn run() {
                 }
                 Err(e) => {
                     eprintln!("[jogicode] FATAL: cannot open log file {:?}: {}", log_path, e);
-                    // Fall back to a no-op logger (println only).
                     Arc::new(Mutex::new(BufWriter::new(Box::new(std::io::sink()) as Box<dyn Write + Send>)))
                 }
             };
 
-            // Spawn code-server.
-            let child_result = spawn_code_server(app, &log, &log_path);
+            // ── Find a free port for code-server ──
+            // Instead of hardcoding 8080 (which can become reserved by
+            // Windows Hyper-V/WSL2/Docker after a reboot), we find a free
+            // port at runtime. Tries 8080-8085 first, then falls back to
+            // an OS-assigned random port.
+            let port = match find_free_port(&log) {
+                Ok(p) => p,
+                Err(e) => {
+                    log_line(&log, &format!("FATAL: cannot find free port: {}", e));
+                    if let Some(window) = app.get_webview_window("main") {
+                        show_ui_error(&window, &format!("Cannot find a free network port: {}", e));
+                    }
+                    return Ok(());
+                }
+            };
+
+            // Spawn code-server on the dynamic port.
+            let child_result = spawn_code_server(app, &log, &log_path, port);
             let child = match child_result {
                 Ok(child) => {
                     let pid = child.id();
-                    log_line(&log, &format!("code-server spawned (pid={})", pid));
-                    // Check if the process is still alive after 2 seconds.
-                    // If it exited immediately, the entry path or args are wrong.
+                    log_line(&log, &format!("code-server spawned (pid={}, port={})", pid, port));
                     let child_check = Arc::new(Mutex::new(Some(child)));
                     let child_for_check = child_check.clone();
                     let log_for_check = log.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_secs(2));
-                        // Try to get a lock on the child — if we can, check if
-                        // it's still running by attempting wait(non-blocking).
                         if let Ok(mut guard) = child_for_check.lock() {
                             if let Some(ref mut child) = *guard {
                                 match child.try_wait() {
@@ -391,18 +415,16 @@ pub fn run() {
                 }
             };
 
-            // Store the child handle so we can kill it when the app closes.
             app.manage(child.clone());
 
-            // Get the main window reference for navigation.
             let main_window = app
                 .get_webview_window("main")
                 .expect("[jogicode] main window not found");
 
             // Spawn a background thread that:
-            //   1. Polls TCP port 8080 until code-server is listening
-            //   2. Does an HTTP health check to verify the server is responding
-            //   3. Navigates the webview from the splash page to code-server
+            //   1. Polls the dynamic port until code-server is listening
+            //   2. Does an HTTP health check
+            //   3. Navigates the webview to code-server
             let log_for_thread = log.clone();
             let window_for_thread = main_window.clone();
 
@@ -410,11 +432,11 @@ pub fn run() {
                 update_ui_status(&window_for_thread, "Starting code-server…");
 
                 // Phase 1: TCP port polling.
-                log_line(&log_for_thread, "waiting for TCP port 8080 to open…");
-                if !wait_for_tcp(CODE_SERVER_PORT, TCP_POLL_TIMEOUT_SECS, &log_for_thread) {
+                log_line(&log_for_thread, &format!("waiting for TCP port {} to open…", port));
+                if !wait_for_tcp(port, TCP_POLL_TIMEOUT_SECS, &log_for_thread) {
                     log_line(
                         &log_for_thread,
-                        &format!("code-server did not open port {} within {}s", CODE_SERVER_PORT, TCP_POLL_TIMEOUT_SECS),
+                        &format!("code-server did not open port {} within {}s", port, TCP_POLL_TIMEOUT_SECS),
                     );
                     show_ui_error(
                         &window_for_thread,
@@ -430,7 +452,7 @@ pub fn run() {
                 // Phase 2: HTTP health check.
                 update_ui_status(&window_for_thread, "Code-server port open, checking HTTP…");
                 log_line(&log_for_thread, "TCP port open, starting HTTP health check…");
-                if !http_health_check(CODE_SERVER_PORT, HTTP_HEALTH_TIMEOUT_SECS, &log_for_thread) {
+                if !http_health_check(port, HTTP_HEALTH_TIMEOUT_SECS, &log_for_thread) {
                     log_line(
                         &log_for_thread,
                         "HTTP health check failed — code-server is listening but not responding to HTTP",
@@ -444,10 +466,10 @@ pub fn run() {
 
                 // Phase 3: Navigate to code-server.
                 update_ui_status(&window_for_thread, "Loading IDE…");
-                log_line(&log_for_thread, "navigating webview to code-server");
+                log_line(&log_for_thread, &format!("navigating webview to code-server on port {}", port));
                 let js = format!(
                     "window.location.href = 'http://127.0.0.1:{}';",
-                    CODE_SERVER_PORT
+                    port
                 );
                 if let Err(e) = window_for_thread.eval(&js) {
                     log_line(&log_for_thread, &format!("failed to navigate: {}", e));
@@ -457,7 +479,6 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Kill code-server when the main window is destroyed.
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window
                     .app_handle()

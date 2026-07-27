@@ -122,14 +122,7 @@ jobs:
           # because the package itself is named "code-server". This causes --save
           # to not work properly, and npm prune --production later deletes
           # code-server from node_modules.
-          cat > package.json <<'PKGJSON'
-{
-  "name": "jogicode-sidecar",
-  "version": "1.0.0",
-  "private": true,
-  "dependencies": {}
-}
-PKGJSON
+          echo '{"name":"jogicode-sidecar","version":"1.0.0","private":true,"dependencies":{}}' > package.json
 
           # Install code-server WITH --save (adds to dependencies in package.json).
           # This is critical: npm prune --production later will keep code-server

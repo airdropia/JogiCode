@@ -46,14 +46,14 @@ if (Test-Path $codeServerPath) {
 # -------------------------------------------------------
 Write-Host "[4] Removing C++ source artifacts..." -ForegroundColor Yellow
 if (Test-Path "$codeServerPath/node_modules") {
-    Get-ChildItem -Path "$codeServerPath/node_modules" -Include "*.cpp","*.h","*.mk","*.target.mk","*.gyp","*.gypi","*.cc","*.hpp" -Recurse -File | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path "$codeServerPath/node_modules" -Include "*.cpp","*.h","*.mk","*.target.mk","*.gyp","*.gypi","*.cc","*.hpp","*.obj","*.pdb","*.lib","*.exp" -Recurse -File | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
 # -------------------------------------------------------
 # 5. Remove test/example/docs/build folders
 # -------------------------------------------------------
 Write-Host "[5] Removing test/example/docs/build folders..." -ForegroundColor Yellow
-$foldersToRemove = @("test", "tests", "test-resources", "example", "examples", "docs", "doc", "build", ".github", ".vscode", ".vscode-test", "coverage", ".nyc_output", "benchmarks", "bench", "scripts")
+$foldersToRemove = @("test", "tests", "test-resources", "example", "examples", "docs", "doc", ".github", ".vscode", ".vscode-test", "coverage", ".nyc_output", "benchmarks", "bench", "scripts")
 foreach ($folder in $foldersToRemove) {
     if (Test-Path $codeServerPath) {
         Get-ChildItem -Path $codeServerPath -Directory -Include $folder -Recurse | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue

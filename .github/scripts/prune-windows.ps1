@@ -159,7 +159,7 @@ if (Test-Path $codeServerPath) {
 # -------------------------------------------------------
 Write-Host "[12] Removing .cache directories..." -ForegroundColor Yellow
 if (Test-Path $codeServerPath) {
-    Get-ChildItem -Path $codeServerPath -Directory -Include ".cache",".parcel-cache","cache" -Recurse | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $codeServerPath -Directory -Include ".cache",".parcel-cache" -Recurse | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # -------------------------------------------------------

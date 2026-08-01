@@ -66,7 +66,7 @@ foreach ($folder in $foldersToRemove) {
 Write-Host "[6] Pruning devDependencies..." -ForegroundColor Yellow
 if (Test-Path $codeServerPath) {
     Push-Location $codeServerPath
-    npm prune --production 2>&1 | Write-Host
+    npm prune --production --ignore-scripts 2>&1 | Write-Host
     Pop-Location
 }
 
@@ -74,7 +74,7 @@ if (Test-Path $codeServerPath) {
 if (Test-Path $vscodePath) {
     Write-Host "[6b] Pruning VS Code devDependencies..." -ForegroundColor Yellow
     Push-Location $vscodePath
-    npm prune --production 2>&1 | Write-Host
+    npm prune --production --ignore-scripts 2>&1 | Write-Host
     Pop-Location
 }
 

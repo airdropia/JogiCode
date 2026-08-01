@@ -15,15 +15,7 @@
         "minWidth": 800,
         "minHeight": 600,
         "resizable": true,
-        "fullscreen": false,
-        "webviewOptions": {
-          "additionalBrowserArgs": [
-            "--memory-pressure-off",
-            "--disable-gpu-shader-disk-cache",
-            "--disable-features=CalculateNativeWinOcclusion",
-            "--js-flags=--max-old-space-size=256"
-          ]
-        }
+        "fullscreen": false
       }
     ],
     "security": {

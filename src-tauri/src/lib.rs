@@ -748,6 +748,26 @@ fn update_ui_status(window: &tauri::WebviewWindow, message: &str) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ── WEBVIEW2 MEMORY CONSTRAINTS ──
+    // Set environment variables that WebView2 (Edge/Chromium) reads at startup
+    // to enforce memory ceilings and reduce background resource consumption.
+    // These must be set BEFORE the webview is created.
+    //
+    // --memory-pressure-off: Prevents Chromium from running background memory
+    //   pressure detection cycles (saves ~2-3% CPU on idle).
+    // --disable-gpu-shader-disk-cache: Reduces disk I/O and cache buildup.
+    // --disable-features=CalculateNativeWinOcclusion: Disables window
+    //   occlusion tracking (saves CPU on Windows).
+    // --js-flags=--max-old-space-size=256: Caps V8 heap in WebView2 to 256MB.
+    //
+    // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS is the official env var for
+    // passing Chromium flags to WebView2.
+    #[cfg(windows)]
+    {
+        let webview_args = "--memory-pressure-off --disable-gpu-shader-disk-cache --disable-features=CalculateNativeWinOcclusion --js-flags=--max-old-space-size=256";
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", webview_args);
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             let log_path = app
@@ -755,6 +775,7 @@ pub fn run() {
                 .app_data_dir()
                 .map(|d| d.join("jogicode.log"))
                 .unwrap_or_else(|_| std::env::temp_dir().join("jogicode.log"));
+
 
             if let Some(parent) = log_path.parent() {
                 if !parent.exists() {

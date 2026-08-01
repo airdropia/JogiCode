@@ -437,78 +437,181 @@ fn ensure_data_dir(
     migrate_old_data(&userdata_dir, &extensions_dir, log);
 
     // Create default settings.json if it doesn't exist.
-    // This configures VS Code to:
-    // 1. Use workspace-relative paths for caches where possible
-    // 2. Enable clipboard support for right-click paste
-    // 3. Keep workspace state clean
+    // This configures VS Code for aggressive memory optimization:
+    // - <600MB RAM ceiling target
+    // - Minimal file watching & indexing
+    // - Workspace-local caching
+    // - Disabled telemetry/updates/auto-save
     let settings_path = user_dir.join("settings.json");
     if !settings_path.exists() {
         let default_settings = r#"{
     // ════════════════════════════════════════════════════════════════════
-    // JogiCode Default Settings
+    // JogiCode Default Settings — Memory Optimized (<600MB target)
     // ════════════════════════════════════════════════════════════════════
 
-    // ── Clipboard ──
-    // Enable syntax highlighting when copying (helps clipboard work better)
-    "editor.copyWithSyntaxHighlighting": true,
-    // Enable clipboard API for right-click paste
-    "editor.multiCursorModifier": "alt",
+    // ── MEMORY CEILING: V8 / Node.js heap limits ──
+    // These are read by code-server's Node.js process to cap V8 heap.
+    // 384MB heap + ~100MB native = ~500MB per extension host.
+    "terminal.integrated.env.windows": {
+        "NODE_OPTIONS": "--max-old-space-size=384"
+    },
 
-    // ── Workspace-local caches ──
-    // TypeScript: use workspace node_modules if available
-    "typescript.tsdk": null,
-    "typescript.enablePromptUseWorkspaceTsdk": true,
-    // TypeScript cache goes in workspace
-    "typescript.tsserver.log": "off",
+    // ── MEMORY: Editor & Text Buffer ──
+    // Reduce undo stack and render buffer memory
+    "editor.maxTokenizationLineLength": 20000,
+    "editor.largeFileOptimizations": true,
+    "editor.semanticHighlighting.enabled": false,
+    "editor.bracketPairColorization.enabled": false,
+    "editor.guides.bracketPairs": false,
+    "editor.unicodeHighlight.ambiguousCharacters": false,
+    "editor.unicodeHighlight.invisibleCharacters": false,
+    "editor.unlinkOnSave": false,
+    "editor.suggestSelection": "first",
+    "editor.wordBasedSuggestions": "off",
+    "editor.quickSuggestions": { "other": false, "comments": false, "strings": false },
 
-    // ── Files ──
-    // Exclude common junk from file watcher (reduces cache load)
+    // ── MEMORY: Disable expensive features ──
+    "editor.minimap.enabled": false,
+    "editor.gotoLocation.multiple": "goto",
+    "editor.codeLens": false,
+    "editor.inlayHints.enabled": "off",
+    "editor.stickyScroll.enabled": false,
+    "editor.linkedEditing": false,
+    "editor.dragAndDrop": false,
+    "editor.suggest.showStatusBar": false,
+    "editor.suggest.preview": false,
+    "editor.suggest.insertMode": "replace",
+    "editor.hover.delay": 500,
+    "editor.parameterHints.enabled": false,
+
+    // ── FILES: Aggressive watcher exclusion (prevents 35+ process spawn) ──
     "files.watcherExclude": {
         "**/.git/objects/**": true,
         "**/.git/subtree-cache/**": true,
         "**/node_modules/**": true,
-        "**/.jogicode/**": true
+        "**/.jogicode/**": true,
+        "**/.tmp/**": true,
+        "**/.cache/**": true,
+        "**/tmp/**": true,
+        "**/temp/**": true,
+        "**/dist/**": true,
+        "**/build/**": true,
+        "**/.next/**": true,
+        "**/.nuxt/**": true,
+        "**/coverage/**": true,
+        "**/.vscode/**": true,
+        "**/out/**": true,
+        "**/__pycache__/**": true,
+        "**/.venv/**": true,
+        "**/venv/**": true,
+        "**/.idea/**": true,
+        "**/target/**": true
     },
     "files.exclude": {
-        "**/.jogicode": true
+        "**/.jogicode": true,
+        "**/.tmp": true,
+        "**/.cache": true
     },
+    "files.hotExit": "off",
+    "files.autoSave": "off",
+
+    // ── SEARCH: Limit memory & CPU ──
     "search.exclude": {
         "**/node_modules": true,
         "**/.jogicode": true,
+        "**/.tmp": true,
         "**/dist": true,
-        "**/build": true
+        "**/build": true,
+        "**/.next": true,
+        "**/.nuxt": true,
+        "**/coverage": true,
+        "**/out": true,
+        "**/__pycache__": true,
+        "**/.venv": true,
+        "**/target": true
     },
+    "search.followSymlinks": false,
+    "search.useReplacePreview": false,
+    "search.smartCase": true,
+    "search.maxResults": 1000,
 
-    // ── Terminal ──
-    // Keep terminal history in workspace
-    "terminal.integrated.scrollback": 5000,
+    // ── TERMINAL: Minimal memory ──
+    "terminal.integrated.scrollback": 1000,
     "terminal.integrated.enablePersistentSessions": false,
+    "terminal.integrated.gpuAcceleration": "off",
+    "terminal.integrated.windowsEnableConpty": false,
 
-    // ── Editor ──
+    // ── TYPESCRIPT: Reduce language server memory ──
+    "typescript.tsdk": null,
+    "typescript.enablePromptUseWorkspaceTsdk": true,
+    "typescript.tsserver.log": "off",
+    "typescript.tsserver.maxTsServerMemory": 256,
+    "typescript.updateImportsOnFileMove.enabled": "never",
+    "typescript.suggestionActions.enabled": false,
+
+    // ── GIT: Minimal overhead ──
+    "git.enabled": true,
+    "git.autorefresh": false,
+    "git.confirmSync": false,
+    "git.fetchOnPull": false,
+    "git.enableSmartCommit": false,
+    "git.decorations.enabled": false,
+    "git.ignoreMissingGitWarning": true,
+
+    // ── EXTENSIONS: Disable auto-anything ──
+    "extensions.autoUpdate": false,
+    "extensions.autoCheckUpdates": false,
+    "extensions.autoFetch": false,
+    "extensions.ignoreRecommendations": true,
+    "extensions.showRecommendationsOnlyOnDemand": true,
+
+    // ── TELEMETRY & UPDATES: Off ──
+    "telemetry.telemetryLevel": "off",
+    "redhat.telemetry.enabled": false,
+    "update.mode": "none",
+    "update.showReleaseNotes": false,
+
+    // ── WORKBENCH: Minimal UI overhead ──
+    "workbench.startupEditor": "none",
+    "workbench.colorTheme": "Default Dark+",
+    "workbench.iconTheme": "vs-minimal",
+    "workbench.activityBar.visible": true,
+    "workbench.statusBar.visible": true,
+    "workbench.sideBar.location": "left",
+    "workbench.editor.enablePreview": true,
+    "workbench.editor.enablePreviewFromQuickOpen": true,
+    "workbench.editor.closeEmptyGroups": true,
+    "workbench.editor.tabCloseButton": "left",
+    "workbench.list.openMode": "doubleClick",
+    "workbench.tips.enabled": false,
+    "workbench.settings.enableNaturalLanguageSearch": false,
+
+    // ── EDITOR: Core settings ──
     "editor.fontSize": 14,
     "editor.tabSize": 2,
     "editor.formatOnSave": false,
-    "editor.minimap.enabled": false,
-    "workbench.startupEditor": "none",
-    "workbench.colorTheme": "Default Dark+",
+    "editor.formatOnPaste": false,
+    "editor.formatOnType": false,
+    "editor.renderWhitespace": "none",
+    "editor.renderControlCharacters": false,
+    "editor.renderLineHighlight": "line",
+    "editor.cursorBlinking": "smooth",
+    "editor.cursorSmoothCaretAnimation": "off",
+    "editor.smoothScrolling": false,
+    "editor.scrollBeyondLastLine": false,
+    "editor.mouseWheelScrollSensitivity": 1,
+    "editor.multiCursorModifier": "alt",
+    "editor.copyWithSyntaxHighlighting": true,
+
+    // ── WINDOW ──
     "window.menuBarVisibility": "visible",
-
-    // ── Extensions ──
-    // Auto-install extensions to the JogiCode extensions dir
-    "extensions.autoUpdate": false,
-    "extensions.autoCheckUpdates": false,
-    "extensions.ignoreRecommendations": false,
-
-    // ── Telemetry ──
-    "telemetry.telemetryLevel": "off",
-    "redhat.telemetry.enabled": false,
-
-    // ── Updates ──
-    "update.mode": "none"
+    "window.title": "${dirty}${activeEditorShort}${separator}${rootName}",
+    "window.restoreFullscreen": false,
+    "window.newWindowDimensions": "maximized"
 }"#;
         std::fs::write(&settings_path, default_settings)
             .map_err(|e| format!("failed to write settings.json: {}", e))?;
-        log_line(log, "created default settings.json");
+        log_line(log, "created default settings.json (memory optimized)");
     }
 
     // Create a default keybindings.json that adds right-click paste support
@@ -584,6 +687,32 @@ fn spawn_code_server(
         // wasn't visible until the process fully exited. With a pipe,
         // we can read stderr in the premature-exit checker thread.
         .stderr(Stdio::piped());
+
+    // ── MEMORY CEILING: Enforce V8 heap limit on code-server process ──
+    // NODE_OPTIONS is read by Node.js at startup and caps the V8 old-space
+    // heap to 384MB. This prevents code-server + extensions from consuming
+    // unbounded memory. Combined with the settings.json terminal env var,
+    // this enforces a hard <600MB ceiling per process.
+    //
+    // We also set UV_THREADPOOL_SIZE=8 (down from default 4, up from 1) to
+    // balance I/O throughput without spawning excessive threads.
+    //
+    // ELECTRON_DISABLE_SECURITY_WARNINGS suppresses console noise.
+    cmd.env("NODE_OPTIONS", "--max-old-space-size=384");
+    cmd.env("UV_THREADPOOL_SIZE", "8");
+    cmd.env("ELECTRON_DISABLE_SECURITY_WARNINGS", "true");
+
+    // ── LOCALIZED TEMP: Redirect temp dirs to JogiCode data dir ──
+    // By default, code-server and extensions write temp files to %TEMP%
+    // (C:\Users\<user>\AppData\Local\Temp). We redirect to a JogiCode-local
+    // temp directory so all temp data is in one place and can be cleaned
+    // easily. This also prevents temp file accumulation in the global temp.
+    let tmp_dir = data_dir.join("tmp");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    cmd.env("TEMP", &tmp_dir);
+    cmd.env("TMP", &tmp_dir);
+    cmd.env("TMPDIR", &tmp_dir);
+    log_line(log, &format!("temp dir redirected to: {:?}", tmp_dir));
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);

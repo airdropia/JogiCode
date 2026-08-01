@@ -673,6 +673,8 @@ fn spawn_code_server(
         .arg("none")
         .arg("--disable-telemetry")
         .arg("--disable-update-check")
+        .arg("--max-extension-host-processes")
+        .arg("1")
         // Store all user data in %APPDATA%\JogiCode\userdata instead of
         // code-server's default %LOCALAPPDATA%\code-server\Data
         .arg("--user-data-dir")

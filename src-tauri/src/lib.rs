@@ -893,17 +893,21 @@ pub fn run() {
             // The window is created here (config has "create": false) so we can
             // point the WebView2 user-data folder at <data>\webview. Without
             // this, WebView2 writes its profile to %LOCALAPPDATA%\<app>\EBWebView.
-            let window_config = app
-                .config()
-                .app
-                .windows
-                .first()
-                .cloned()
-                .ok_or_else(|| "no window config in tauri.conf.json".to_string())?;
-            tauri::WebviewWindowBuilder::from_config(app, &window_config)
-                .data_directory(data_dir.join("webview"))
-                .build()
-                .map_err(|e| format!("failed to create main window: {}", e))?;
+            let window_config = match app.config().app.windows.first() {
+                Some(cfg) => cfg.clone(),
+                None => {
+                    log_line(&log, "FATAL: no window config in tauri.conf.json");
+                    return Ok(());
+                }
+            };
+            // `from_config` returns a Result, so chain with `and_then` before
+            // `build` (also a Result). Both errors are `tauri::Error`.
+            if let Err(e) = tauri::WebviewWindowBuilder::from_config(app, &window_config)
+                .and_then(|builder| builder.data_directory(data_dir.join("webview")).build())
+            {
+                log_line(&log, &format!("FATAL: failed to create main window: {}", e));
+                return Ok(());
+            }
             log_line(&log, "main window created (portable webview profile)");
 
             // ── Find a free port for code-server ──

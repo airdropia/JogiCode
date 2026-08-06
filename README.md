@@ -38,6 +38,36 @@ code-server npm package, then bundles both as Tauri resources. Rust spawns
 - Clean process lifecycle — closing the window kills code-server
 - No port conflicts — code-server only runs while JogiCode is open
 
+## Portable mode (zero footprint)
+
+JogiCode runs as a true portable "green" app. When the exe is placed in a
+writable folder (e.g. extracted from the portable ZIP), ALL runtime data lives
+in a `data` folder next to the exe:
+
+```
+JogiCode/
+├── JogiCode.exe
+├── resources/            (bundled Node.js + code-server sidecar)
+└── data/                 (created on first run)
+    ├── userdata/         (VS Code settings, workspace state)
+    ├── extensions/       (installed extensions, e.g. Kilo Code)
+    ├── webview/          (WebView2 profile)
+    ├── home/             (Kilo Code config: home\.config\kilo, etc.)
+    ├── appdata/          (redirected APPDATA for code-server's child process)
+    └── tmp/              (temp files)
+```
+
+Nothing is written to `%APPDATA%`, `%LOCALAPPDATA%`, `ProgramData`, or the
+registry during normal use. To uninstall, just delete the folder.
+
+- On first run, an existing code-server setup (`%LOCALAPPDATA%\code-server`)
+  and Kilo Code config (`~\.config\kilo`) are migrated into `data` automatically.
+- SSH keys are **never** copied automatically. If you push to git from inside
+  JogiCode, copy your `~/.ssh` folder into `data\home\.ssh` first.
+- Installed mode (NSIS installer, Program Files) falls back to
+  `%APPDATA%\JogiCode` because Program Files is not writable. The app works the
+  same either way.
+
 ## Build
 
 The GitHub Actions workflow (`.github/workflows/build-windows.yml`)
@@ -46,7 +76,8 @@ automatically:
 1. Downloads the official Node.js portable Windows x64 binary
 2. Installs code-server npm package (pinned version)
 3. Compiles the Tauri Rust shell
-4. Produces `JogiCode_x.y.z_x64-setup.exe` (NSIS installer)
+4. Produces `JogiCode_x.y.z_x64-setup.exe` (NSIS installer) and
+   `JogiCode_x.y.z-portable-x64.zip` (portable build — extract and run)
 
 Push a `v*` tag to trigger a release build:
 
@@ -65,3 +96,10 @@ git push origin v1.0.0
 | Frontend | Static HTML splash → code-server WebView |
 | Installer | NSIS (.exe) |
 | Target | Windows x86_64 only |
+
+## Memory notes
+
+The code-server Node.js heap is capped at 384MB (`NODE_OPTIONS` in
+`src-tauri/src/lib.rs`) and the WebView2 V8 heap at 256MB. These are already
+aggressive; raise the 384 to 512 only if you see extension-host
+out-of-memory errors in `data\jogicode.log`.

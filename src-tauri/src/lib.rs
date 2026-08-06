@@ -14,6 +14,14 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Redirect code-server's APPDATA into the JogiCode data dir (portable mode).
+///
+/// Some native modules (e.g. `@vscode/deviceid`) read APPDATA at startup to
+/// fingerprint the machine. Redirecting it keeps the app fully self-contained.
+/// If any extension misbehaves because of this, set this to `false` and rebuild
+/// — everything else (USERPROFILE/HOME/TEMP) stays redirected either way.
+const REDIRECT_APPDATA: bool = true;
+
 /// TCP port polling timeout (seconds).
 const TCP_POLL_TIMEOUT_SECS: u64 = 60;
 /// HTTP health check timeout after TCP port opens (seconds).
@@ -401,20 +409,75 @@ fn migrate_old_data(
     }
 }
 
+/// Resolve where JogiCode keeps all runtime data.
+///
+/// Portable mode (default): a `data` folder next to the executable, so the app
+/// is fully self-contained — nothing is written to AppData. Used when that
+/// folder is writable (e.g. extracted from the portable ZIP).
+///
+/// Installed mode (fallback): `%APPDATA%\JogiCode` — used when the exe lives in
+/// a read-only location (Program Files via NSIS), where a sibling `data` folder
+/// cannot be created.
+fn resolve_data_dir(app: &tauri::App) -> Result<std::path::PathBuf, String> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join("data");
+            if candidate.is_dir() || std::fs::create_dir_all(&candidate).is_ok() {
+                return Ok(candidate);
+            }
+        }
+    }
+    app.path()
+        .app_data_dir()
+        .map_err(|e| format!("failed to resolve app_data_dir: {}", e))
+}
+
+/// Migrate an existing Kilo Code config (`~/.config/kilo`) into
+/// `<data>\home\.config\kilo` on the first portable run, so the user keeps
+/// their Kilo setup and API key. SSH keys are never copied automatically.
+fn migrate_kilo_config(data_dir: &std::path::Path, log: &LogFile) {
+    let dest = data_dir.join("home").join(".config").join("kilo");
+    if dest.exists() {
+        log_line(log, "kilo config already present in data/home, skipping migration");
+        return;
+    }
+
+    let mut src: Option<std::path::PathBuf> = None;
+    if let Ok(up) = std::env::var("USERPROFILE") {
+        let p = std::path::PathBuf::from(up).join(".config").join("kilo");
+        if p.is_dir() {
+            src = Some(p);
+        }
+    }
+    if src.is_none() {
+        if let Ok(home) = std::env::var("HOME") {
+            let p = std::path::PathBuf::from(home).join(".config").join("kilo");
+            if p.is_dir() {
+                src = Some(p);
+            }
+        }
+    }
+
+    if let Some(src) = src {
+        log_line(log, &format!("found kilocode config at {:?}, migrating to data/home", src));
+        match copy_dir_recursive(&src, &dest, log) {
+            Ok(n) => log_line(log, &format!("migrated {} kilocode config files to {:?}", n, dest)),
+            Err(e) => log_line(log, &format!("kilocode config migration failed: {}", e)),
+        }
+    } else {
+        log_line(log, "no existing kilocode config found to migrate");
+    }
+}
+
 /// Ensure the JogiCode data directory exists and create a default settings.json
 /// that configures VS Code for workspace-local caching and clipboard support.
 fn ensure_data_dir(
-    app: &tauri::App,
+    data_dir: &std::path::Path,
     log: &LogFile,
-) -> Result<std::path::PathBuf, String> {
-    // All JogiCode data lives under %APPDATA%\JogiCode\ (Windows)
-    // This keeps everything in one clean place instead of scattered across
-    // %LOCALAPPDATA%\code-server\, %APPDATA%\code-server\, etc.
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("failed to resolve app_data_dir: {}", e))?;
-
+) -> Result<(), String> {
+    // All JogiCode data lives under the resolved data dir (portable: next to the
+    // exe; installed: %APPDATA%\JogiCode\). This keeps everything in one clean
+    // place instead of scattered across %LOCALAPPDATA%\code-server\, etc.
     let userdata_dir = data_dir.join("userdata");
     let extensions_dir = data_dir.join("extensions");
     let user_dir = userdata_dir.join("User");
@@ -433,8 +496,10 @@ fn ensure_data_dir(
 
     // ── Migrate old data BEFORE creating default settings ──
     // This copies old code-server data (including installed extensions
-    // like Kilo Code) to the new JogiCode location.
+    // like Kilo Code) to the new JogiCode location, and migrates any existing
+    // Kilo Code config (~/.config/kilo) into data/home.
     migrate_old_data(&userdata_dir, &extensions_dir, log);
+    migrate_kilo_config(data_dir, log);
 
     // Create default settings.json if it doesn't exist.
     // This configures VS Code for aggressive memory optimization:
@@ -629,7 +694,7 @@ fn ensure_data_dir(
         log_line(log, "created default keybindings.json");
     }
 
-    Ok(data_dir)
+    Ok(())
 }
 
 /// Spawn code-server on the given port.
@@ -640,11 +705,12 @@ fn spawn_code_server(
     log: &LogFile,
     log_path: &std::path::Path,
     port: u16,
+    data_dir: &std::path::Path,
 ) -> Result<Child, String> {
     let (node_exe, cs_entry) = resolve_sidecar_paths(app, log)?;
 
     // Ensure data directories exist and settings.json is created.
-    let data_dir = ensure_data_dir(app, log)?;
+    ensure_data_dir(data_dir, log)?;
     let userdata_dir = data_dir.join("userdata");
     let extensions_dir = data_dir.join("extensions");
 
@@ -701,6 +767,24 @@ fn spawn_code_server(
     cmd.env("NODE_OPTIONS", "--max-old-space-size=384");
     cmd.env("UV_THREADPOOL_SIZE", "8");
     cmd.env("ELECTRON_DISABLE_SECURITY_WARNINGS", "true");
+
+    // ── PORTABLE MODE: Redirect home/AppData into the JogiCode data dir ──
+    // Only the code-server child sees these overrides; the rest of the OS is
+    // untouched. This keeps Kilo Code config (~/.config/kilo) and any other
+    // home-dir-writing tool inside <data>\home so nothing leaks to the real
+    // user profile.
+    let home_dir = data_dir.join("home");
+    let _ = std::fs::create_dir_all(&home_dir);
+    cmd.env("USERPROFILE", &home_dir);
+    cmd.env("HOME", &home_dir);
+    log_line(log, &format!("USERPROFILE/HOME redirected to: {:?}", home_dir));
+
+    if REDIRECT_APPDATA {
+        let appdata_dir = data_dir.join("appdata");
+        let _ = std::fs::create_dir_all(&appdata_dir);
+        cmd.env("APPDATA", &appdata_dir);
+        log_line(log, &format!("APPDATA redirected to: {:?}", appdata_dir));
+    }
 
     // ── LOCALIZED TEMP: Redirect temp dirs to JogiCode data dir ──
     // By default, code-server and extensions write temp files to %TEMP%
@@ -770,18 +854,21 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
-            let log_path = app
-                .path()
-                .app_data_dir()
-                .map(|d| d.join("jogicode.log"))
-                .unwrap_or_else(|_| std::env::temp_dir().join("jogicode.log"));
-
-
-            if let Some(parent) = log_path.parent() {
-                if !parent.exists() {
-                    let _ = std::fs::create_dir_all(parent);
+            // ── DATA DIRECTORY (portable first, AppData fallback) ──
+            // Portable mode: <exe dir>\data so the app is fully self-contained.
+            // Installed mode (Program Files via NSIS): %APPDATA%\JogiCode.
+            let data_dir = match resolve_data_dir(app) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("[jogicode] FATAL: cannot resolve data dir: {}", e);
+                    std::env::temp_dir().join("jogicode")
                 }
+            };
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                eprintln!("[jogicode] FATAL: cannot create data dir {:?}: {}", data_dir, e);
             }
+
+            let log_path = data_dir.join("jogicode.log");
 
             let log_file = OpenOptions::new()
                 .create(true)
@@ -800,6 +887,24 @@ pub fn run() {
                     Arc::new(Mutex::new(BufWriter::new(Box::new(std::io::sink()) as Box<dyn Write + Send>)))
                 }
             };
+            log_line(&log, &format!("data dir: {:?}", data_dir));
+
+            // ── MAIN WINDOW (portable WebView2 profile) ──
+            // The window is created here (config has "create": false) so we can
+            // point the WebView2 user-data folder at <data>\webview. Without
+            // this, WebView2 writes its profile to %LOCALAPPDATA%\<app>\EBWebView.
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .first()
+                .cloned()
+                .ok_or_else(|| "no window config in tauri.conf.json".to_string())?;
+            tauri::WebviewWindowBuilder::from_config(app, &window_config)
+                .data_directory(data_dir.join("webview"))
+                .build()
+                .map_err(|e| format!("failed to create main window: {}", e))?;
+            log_line(&log, "main window created (portable webview profile)");
 
             // ── Find a free port for code-server ──
             // Instead of hardcoding 8080 (which can become reserved by
@@ -818,7 +923,7 @@ pub fn run() {
             };
 
             // Spawn code-server on the dynamic port.
-            let child_result = spawn_code_server(app, &log, &log_path, port);
+            let child_result = spawn_code_server(app, &log, &log_path, port, &data_dir);
             let child = match child_result {
                 Ok(mut child) => {
                     let pid = child.id();
@@ -907,7 +1012,7 @@ pub fn run() {
                         &window_for_thread,
                         &format!(
                             "code-server failed to start within {}s. \
-                             Check jogicode.log in %APPDATA%\\com.jogicode.app\\",
+                             Check jogicode.log next to the app.",
                             TCP_POLL_TIMEOUT_SECS
                         ),
                     );

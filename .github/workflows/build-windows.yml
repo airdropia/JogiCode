@@ -278,6 +278,28 @@ jobs:
           prerelease: false
           args: --target ${{ env.WINDOWS_TARGET }}
 
+      - name: Package portable ZIP (data next to exe)
+        shell: pwsh
+        run: |
+          $release = "src-tauri/target/${{ env.WINDOWS_TARGET }}/release"
+          if (-not (Test-Path $release)) { throw "release dir not found: $release" }
+
+          $exe = Get-ChildItem "$release" -Filter "*.exe" | Where-Object { $_.Name -match '^[Jj]ogi[Cc]ode\.exe$' } | Select-Object -First 1
+          if (-not $exe) { throw "main executable not found in $release" }
+
+          $stage = "portable/JogiCode"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $exe.FullName -Destination $stage
+
+          if (Test-Path "$release/resources") { Copy-Item "$release/resources" "$stage" -Recurse }
+          Get-ChildItem "$release/*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination $stage
+
+          $conf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $zip = "JogiCode-$($conf.version)-portable-x64.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
+          if (-not (Test-Path $zip)) { throw "failed to create $zip" }
+          Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)"
+
       - name: Upload JogiCode installer artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -285,5 +307,14 @@ jobs:
           name: JogiCode-windows-x64-installer
           path: |
             src-tauri/target/${{ env.WINDOWS_TARGET }}/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload JogiCode portable ZIP artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JogiCode-portable-x64
+          path: JogiCode-*-portable-x64.zip
           if-no-files-found: warn
           retention-days: 30

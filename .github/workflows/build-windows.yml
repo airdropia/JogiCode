@@ -287,11 +287,18 @@ jobs:
           $exe = Get-ChildItem "$release" -Filter "*.exe" | Where-Object { $_.Name -match '^[Jj]ogi[Cc]ode\.exe$' } | Select-Object -First 1
           if (-not $exe) { throw "main executable not found in $release" }
 
+          # Runtime layout on Windows: resource_dir() = directory containing the
+          # main executable, so the sidecar must sit in a "binaries" folder NEXT
+          # TO the exe (same layout the NSIS installer produces). The pruned
+          # sidecar lives at src-tauri/binaries (built + pruned earlier in this
+          # workflow) and is what the bundler packages.
+          if (-not (Test-Path "src-tauri/binaries/node.exe")) { throw "sidecar node.exe not found in src-tauri/binaries" }
+
           $stage = "portable/JogiCode"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item $exe.FullName -Destination $stage
+          Copy-Item $exe.FullName -Destination (Join-Path $stage "JogiCode.exe")
+          Copy-Item "src-tauri/binaries" (Join-Path $stage "binaries") -Recurse
 
-          if (Test-Path "$release/resources") { Copy-Item "$release/resources" "$stage" -Recurse }
           Get-ChildItem "$release/*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination $stage
 
           $conf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
@@ -299,6 +306,9 @@ jobs:
           Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
           if (-not (Test-Path $zip)) { throw "failed to create $zip" }
           Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)"
+          Write-Host "--- portable layout ---"
+          Get-ChildItem -Path $stage -Recurse -File | Select-Object -First 5 | ForEach-Object { $_.FullName.Replace((Resolve-Path $stage).Path, $stage) }
+          Write-Host "binaries/node.exe exists: $(Test-Path (Join-Path $stage 'binaries/node.exe'))"
 
       - name: Upload JogiCode installer artifact
         if: always()

@@ -47,7 +47,7 @@ in a `data` folder next to the exe:
 ```
 JogiCode/
 ├── JogiCode.exe
-├── resources/            (bundled Node.js + code-server sidecar)
+├── binaries/             (bundled Node.js + code-server sidecar)
 └── data/                 (created on first run)
     ├── userdata/         (VS Code settings, workspace state)
     ├── extensions/       (installed extensions, e.g. Kilo Code)
